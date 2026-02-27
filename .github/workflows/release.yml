@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Binary archives (tar.gz / zip) ────────────────────────────────
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: mdink-linux-x86_64.tar.gz
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: mdink-linux-aarch64.tar.gz
+            cross_linker: gcc-aarch64-linux-gnu
+
+          - os: macos-13          # Intel runner → native x86_64
+            target: x86_64-apple-darwin
+            archive: mdink-macos-x86_64.tar.gz
+
+          - os: macos-latest      # Apple Silicon runner → native aarch64
+            target: aarch64-apple-darwin
+            archive: mdink-macos-aarch64.tar.gz
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: mdink-windows-x86_64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux aarch64 needs a cross-linker; all other targets build natively.
+      - name: Install cross-linker (aarch64 Linux only)
+        if: matrix.cross_linker != ''
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y "$CROSS_LINKER"
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' \
+            >> ~/.cargo/config.toml
+        env:
+          CROSS_LINKER: ${{ matrix.cross_linker }}
+
+      - name: Build
+        run: cargo build --profile dist --target "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: tar czf "$ARCHIVE" -C "target/$TARGET/dist" mdink
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "target/$env:TARGET/dist/mdink.exe" `
+            -DestinationPath "$env:ARCHIVE"
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          retention-days: 1
+
+  # ── Debian package (.deb) ─────────────────────────────────────────
+  deb:
+    name: .deb package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb
+        run: cargo deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+          retention-days: 1
+
+  # ── GitHub Release (draft, attach all assets) ──────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build, deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: List assets
+        run: ls -lh dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
