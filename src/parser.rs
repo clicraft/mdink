@@ -486,20 +486,37 @@ impl<'a> ParseContext<'a> {
     }
 
     fn start_paragraph(&mut self) {
-        // Inside a list item, paragraph text flows into the item's content
-        // rather than becoming a child Paragraph block.
+        // Immediately inside a list item: paragraph text flows into the item's
+        // content rather than becoming a child Paragraph block.
         if matches!(self.state_stack.last(), Some(ParserState::InListItem { .. })) {
             self.state_stack.push(ParserState::InListItemParagraph);
+            return;
+        }
+        // Inside a blockquote that is itself inside a list item: stash the list
+        // item's accumulated spans so this paragraph can reuse current_spans.
+        // end_paragraph restores the stash after emitting the paragraph block.
+        let in_list_item = self
+            .state_stack
+            .iter()
+            .rev()
+            .any(|s| matches!(s, ParserState::InListItem { .. }));
+        if in_list_item {
+            self.span_stash = std::mem::take(&mut self.current_spans);
         } else {
             self.current_spans.clear();
-            self.state_stack.push(ParserState::InParagraph);
         }
+        self.state_stack.push(ParserState::InParagraph);
     }
 
     fn end_paragraph(&mut self) {
         match self.state_stack.pop() {
             Some(ParserState::InParagraph) => {
                 let content = std::mem::take(&mut self.current_spans);
+                // Restore any list-item spans saved by start_paragraph when we
+                // entered a paragraph inside a blockquote-inside-a-list-item.
+                if !self.span_stash.is_empty() {
+                    self.current_spans = std::mem::take(&mut self.span_stash);
+                }
                 self.emit_block(RenderedBlock::Paragraph { content });
             }
             Some(ParserState::InListItemParagraph) => {
@@ -517,6 +534,9 @@ impl<'a> ParseContext<'a> {
                     false,
                     "End(Paragraph) in unexpected state: {other:?}"
                 );
+                // Prevent content from leaking into the next block.
+                self.current_spans.clear();
+                self.span_stash.clear();
             }
         }
     }
@@ -561,6 +581,8 @@ impl<'a> ParseContext<'a> {
 
     fn start_list_item(&mut self) {
         self.current_spans.clear();
+        // Clear any stale stash from a previous item at this nesting level.
+        self.span_stash.clear();
         self.state_stack
             .push(ParserState::InListItem { children: Vec::new(), task: None });
     }
@@ -571,9 +593,12 @@ impl<'a> ParseContext<'a> {
         if self.current_spans.last().is_some_and(|s| s.text == " ") {
             self.current_spans.pop();
         }
-        let content = std::mem::take(&mut self.current_spans);
+        // Validate state BEFORE taking content — prevents spans being silently
+        // discarded in the mismatch arm (and prevents content leaking into the
+        // next item if we continue after the error).
         match self.state_stack.pop() {
             Some(ParserState::InListItem { children, task }) => {
+                let content = std::mem::take(&mut self.current_spans);
                 let item = ListItem { content, children, task };
                 match self.state_stack.last_mut() {
                     Some(ParserState::InList { items, .. }) => {
@@ -586,6 +611,8 @@ impl<'a> ParseContext<'a> {
             }
             other => {
                 debug_assert!(false, "End(Item) without InListItem state: {other:?}");
+                // current_spans intentionally NOT taken — content stays in place
+                // so it doesn't vanish silently in release builds.
             }
         }
     }

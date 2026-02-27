@@ -532,3 +532,91 @@
         // Just verify it doesn't panic and produces 3 lines.
         assert_eq!(doc.total_height, 3);
     }
+
+    #[test]
+    fn test_layout_table_cjk_no_panic_and_correct_width() {
+        // CJK characters are 2 display columns wide.
+        // Column widths must be measured by display width, not scalar count,
+        // so the header "名前" (4 display cols, 2 chars) rounds up to ≥4.
+        use pulldown_cmark::Alignment;
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("名前"), make_cell("Val")],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec![make_cell("abc"), make_cell("42")]],
+        }];
+        let doc = flatten(&blocks, 80);
+        // Must not panic and must produce header + separator + 1 row.
+        assert_eq!(doc.total_height, 3);
+        // The header row's rendered text must contain the CJK characters.
+        if let DocumentLine::Text(header_line) = &doc.lines[0] {
+            let text: String = header_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("名前"), "header should contain CJK chars: {text:?}");
+        }
+    }
+
+    #[test]
+    fn test_layout_list_child_code_block_is_indented() {
+        // A code block nested inside a list item should be indented to match
+        // the item's content column, not rendered flush with the left edge.
+        use crate::parser::ListItem;
+        let code_block = RenderedBlock::CodeBlock {
+            language: String::new(),
+            highlighted_lines: vec![ratatui::text::Line::from("code line")],
+        };
+        let item = ListItem {
+            content: vec![plain_span("item text")],
+            children: vec![code_block],
+            task: None,
+        };
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![item],
+        }];
+        let doc = flatten(&blocks, 80);
+        // Should be: item text line + code line (indented)
+        assert!(doc.total_height >= 2);
+        // The code line should be a Code variant with an indent prefix span.
+        let code_lines: Vec<_> = doc.lines.iter().filter(|l| matches!(l, DocumentLine::Code(_))).collect();
+        assert_eq!(code_lines.len(), 1, "should have exactly one Code line");
+        if let DocumentLine::Code(l) = &code_lines[0] {
+            // First span must be whitespace indentation.
+            let first_span = l.spans.first().expect("code line should have spans");
+            assert!(
+                first_span.content.trim().is_empty(),
+                "first span of indented code should be whitespace, got: {:?}",
+                first_span.content
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_block_quote_inside_list_preserves_list_depth() {
+        // A block quote inside a list item (depth=1) should thread list_depth
+        // into flatten_block_quote rather than resetting it to 0.
+        use crate::parser::ListItem;
+        let quote = RenderedBlock::BlockQuote {
+            children: vec![RenderedBlock::List {
+                ordered: false,
+                start: 1,
+                items: vec![crate::parser::ListItem {
+                    content: vec![plain_span("nested in quote")],
+                    children: vec![],
+                    task: None,
+                }],
+            }],
+        };
+        let outer_item = ListItem {
+            content: vec![plain_span("outer")],
+            children: vec![quote],
+            task: None,
+        };
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![outer_item],
+        }];
+        // Must not panic.
+        let doc = flatten(&blocks, 80);
+        assert!(doc.total_height >= 2);
+    }

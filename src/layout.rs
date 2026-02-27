@@ -7,7 +7,7 @@
 use pulldown_cmark::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::parser::{ListItem, RenderedBlock, StyledSpan};
 
@@ -106,7 +106,7 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
         RenderedBlock::List { ordered, start, items } => {
             flatten_list(items, *ordered, *start, width, list_depth)
         }
-        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width),
+        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth),
         RenderedBlock::Table { headers, alignments, rows } => {
             flatten_table(headers, alignments, rows, width)
         }
@@ -165,10 +165,35 @@ fn flatten_list(
             }
         }
 
-        // Flatten child blocks (nested lists, code blocks, etc.) at the next depth.
+        // Flatten child blocks. Nested lists handle their own indentation via
+        // depth+1. Non-list children (code blocks, blockquotes, paragraphs)
+        // need an explicit indent prefix to align under the item's content.
         for child in &item.children {
-            let child_lines = flatten_single_block(child, width, depth + 1);
-            lines.extend(child_lines);
+            match child {
+                RenderedBlock::List { .. } => {
+                    let child_lines = flatten_single_block(child, width, depth + 1);
+                    lines.extend(child_lines);
+                }
+                _ => {
+                    let child_width = width.saturating_sub(first_prefix_width).max(1);
+                    let child_lines = flatten_single_block(child, child_width, depth + 1);
+                    for line in child_lines {
+                        match line {
+                            DocumentLine::Text(l) => {
+                                let mut spans = vec![Span::raw(cont_prefix.clone())];
+                                spans.extend(l.spans);
+                                lines.push(DocumentLine::Text(Line::from(spans)));
+                            }
+                            DocumentLine::Code(l) => {
+                                let mut spans = vec![Span::raw(cont_prefix.clone())];
+                                spans.extend(l.spans);
+                                lines.push(DocumentLine::Code(Line::from(spans)));
+                            }
+                            other => lines.push(other),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -182,7 +207,7 @@ fn flatten_list(
 /// Every output line from each child block gets a `│ ` prefix applied.
 /// Nested block quotes recursively add another `│ ` level.
 /// The dim+italic modifier is merged into all text spans.
-fn flatten_block_quote(children: &[RenderedBlock], width: usize) -> Vec<DocumentLine> {
+fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usize) -> Vec<DocumentLine> {
     const PREFIX: &str = "│ ";
     const PREFIX_WIDTH: usize = 2; // "│ " is 2 display columns
     let inner_width = width.saturating_sub(PREFIX_WIDTH).max(1);
@@ -198,7 +223,9 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize) -> Vec<Document
                 quote_style,
             ))));
         }
-        let child_lines = flatten_single_block(child, inner_width, 0);
+        // Thread list_depth so nested lists inside block quotes render with
+        // the correct bullet depth rather than resetting to depth 0.
+        let child_lines = flatten_single_block(child, inner_width, list_depth);
         for line in child_lines {
             match line {
                 DocumentLine::Text(l) => {
@@ -255,15 +282,17 @@ fn flatten_table(
     }
 
     // Calculate column widths: max of header and all body cells in that column.
+    // Use display width (UnicodeWidthStr) so CJK characters (2 columns wide)
+    // are measured correctly instead of counting Unicode scalar values.
     let mut col_widths: Vec<usize> = headers
         .iter()
-        .map(|cell| cell.iter().map(|s| s.text.chars().count()).sum::<usize>().max(3))
+        .map(|cell| cell.iter().map(|s| s.text.width()).sum::<usize>().max(3))
         .collect();
 
     for row in rows {
         for (col, cell) in row.iter().enumerate() {
             if col < col_widths.len() {
-                let w: usize = cell.iter().map(|s| s.text.chars().count()).sum();
+                let w: usize = cell.iter().map(|s| s.text.width()).sum();
                 col_widths[col] = col_widths[col].max(w);
             }
         }
@@ -347,21 +376,35 @@ fn build_table_separator(col_widths: &[usize], style: Style) -> Vec<Span<'static
 }
 
 /// Pads or truncates `text` to exactly `width` display columns with given alignment.
+///
+/// Uses `UnicodeWidthStr` / `UnicodeWidthChar` so that wide characters (e.g. CJK,
+/// emoji) are counted by their terminal cell width, not by Unicode scalar count.
 fn align_cell(text: &str, width: usize, alignment: Alignment) -> String {
-    let char_count = text.chars().count();
-    if char_count >= width {
-        // Truncate to fit — prevents overflow into adjacent columns.
-        text.chars().take(width).collect()
+    let display_width = text.width();
+    if display_width >= width {
+        // Truncate char-by-char to avoid splitting wide characters mid-cell.
+        let mut taken = 0usize;
+        text.chars()
+            .take_while(|c| {
+                let cw = c.width().unwrap_or(0);
+                if taken + cw <= width {
+                    taken += cw;
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect()
     } else {
-        let padding = width - char_count;
+        let padding = width - display_width;
         match alignment {
-            Alignment::Right => format!("{:>width$}", text, width = width),
+            Alignment::Right => format!("{}{}", " ".repeat(padding), text),
             Alignment::Center => {
                 let left = padding / 2;
                 let right = padding - left;
                 format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
             }
-            _ => format!("{:<width$}", text, width = width),
+            _ => format!("{}{}", text, " ".repeat(padding)),
         }
     }
 }

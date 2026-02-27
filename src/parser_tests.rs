@@ -694,3 +694,54 @@
             }
         }
     }
+
+    // ── Bug-fix regression tests ─────────────────────────────────
+
+    #[test]
+    fn test_parser_blockquote_in_list_item_preserves_item_text() {
+        // A loose list item whose content is followed by a block quote.
+        // Without the span_stash fix, the item's paragraph text was wiped by
+        // start_paragraph's current_spans.clear() when the inner paragraph
+        // (inside the block quote) started.
+        let md = "- item text\n\n  > quoted inside";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1, "should be one List block");
+        match &blocks[0] {
+            RenderedBlock::List { items, .. } => {
+                assert_eq!(items.len(), 1);
+                let item_text: String =
+                    items[0].content.iter().map(|s| s.text.as_str()).collect();
+                assert!(
+                    item_text.contains("item text"),
+                    "list item content should survive the nested block quote; got: {item_text:?}"
+                );
+                assert!(
+                    items[0].children.iter().any(|c| matches!(c, RenderedBlock::BlockQuote { .. })),
+                    "block quote should be a child of the list item"
+                );
+            }
+            _ => panic!("expected List block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_two_paragraphs_no_content_bleeding() {
+        // Adjacent paragraphs must not bleed content into each other.
+        // Regression for end_paragraph else-arm leaving current_spans dirty.
+        let md = "para one\n\npara two";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 2);
+        match (&blocks[0], &blocks[1]) {
+            (RenderedBlock::Paragraph { content: c1 }, RenderedBlock::Paragraph { content: c2 }) => {
+                let t1: String = c1.iter().map(|s| s.text.as_str()).collect();
+                let t2: String = c2.iter().map(|s| s.text.as_str()).collect();
+                assert!(t1.contains("para one"), "first paragraph wrong: {t1:?}");
+                assert!(t2.contains("para two"), "second paragraph wrong: {t2:?}");
+                assert!(
+                    !t2.contains("para one"),
+                    "second paragraph must not contain first paragraph's text"
+                );
+            }
+            _ => panic!("expected two Paragraph blocks"),
+        }
+    }
