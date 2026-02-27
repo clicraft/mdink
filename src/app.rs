@@ -9,6 +9,7 @@ use std::ops::Range;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::PreRenderedDocument;
+use crate::theme::MarkdownTheme;
 
 /// Application state for the TUI viewer.
 ///
@@ -16,6 +17,8 @@ use crate::layout::PreRenderedDocument;
 /// and session metadata. Methods handle keyboard input and scroll
 /// arithmetic.
 pub struct App {
+    /// The active theme controlling all visual styling.
+    pub theme: MarkdownTheme,
     /// The pre-rendered document (all lines laid out for display).
     pub document: PreRenderedDocument,
     /// Current vertical scroll offset (0 = top of document).
@@ -33,8 +36,9 @@ impl App {
     ///
     /// Scroll starts at the top; viewport height is set to 0 and must
     /// be updated by `main.rs` before each draw call.
-    pub fn new(document: PreRenderedDocument, filename: String) -> Self {
+    pub fn new(document: PreRenderedDocument, filename: String, theme: MarkdownTheme) -> Self {
         Self {
+            theme,
             document,
             scroll_offset: 0,
             viewport_height: 0,

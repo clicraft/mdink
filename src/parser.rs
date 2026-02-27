@@ -7,8 +7,10 @@
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
+
+use crate::theme::{self, MarkdownTheme};
 
 /// A rendered markdown block ready for layout.
 ///
@@ -128,34 +130,6 @@ enum ParserState {
     },
 }
 
-/// Returns the default heading style for a given level (1–6).
-///
-/// Centralized here as the single swap point for Phase 5 theming.
-fn default_heading_style(level: u8) -> Style {
-    let color = match level {
-        1 => Color::LightCyan,
-        2 => Color::Green,
-        3 => Color::Yellow,
-        // h4–h6 all use white
-        _ => Color::White,
-    };
-    let modifier = match level {
-        1..=3 => Modifier::BOLD,
-        _ => Modifier::BOLD | Modifier::ITALIC,
-    };
-    Style::default().fg(color).add_modifier(modifier)
-}
-
-/// Returns the default inline code style.
-///
-/// Dark gray background with light gray foreground.
-fn default_code_style() -> Style {
-    Style::default()
-        .bg(Color::Indexed(236))
-        .fg(Color::Indexed(252))
-        .add_modifier(Modifier::BOLD | Modifier::ITALIC)
-}
-
 /// Computes the effective style by merging the current base style with
 /// all active inline modifiers from the style stack.
 fn effective_style(style_stack: &[Style]) -> Style {
@@ -186,6 +160,7 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 struct ParseContext<'a> {
     highlighter: &'a crate::highlight::Highlighter,
     images: &'a mut crate::images::ImageManager,
+    theme: &'a MarkdownTheme,
     blocks: Vec<RenderedBlock>,
     /// Block-level state machine (never empty while parsing).
     state_stack: Vec<ParserState>,
@@ -205,10 +180,12 @@ impl<'a> ParseContext<'a> {
     fn new(
         highlighter: &'a crate::highlight::Highlighter,
         images: &'a mut crate::images::ImageManager,
+        theme: &'a MarkdownTheme,
     ) -> Self {
         Self {
             highlighter,
             images,
+            theme,
             blocks: Vec::new(),
             state_stack: vec![ParserState::TopLevel],
             style_stack: Vec::new(),
@@ -272,7 +249,7 @@ impl<'a> ParseContext<'a> {
                     let highlighted_lines = self.highlighter.highlight_code(
                         &buffer,
                         &language,
-                        "base16-ocean.dark",
+                        &self.theme.syntect_theme,
                     );
                     self.emit_block(RenderedBlock::CodeBlock { language, highlighted_lines });
                 }
@@ -406,14 +383,14 @@ impl<'a> ParseContext<'a> {
             Event::Code(text) => self.push_inline_code(&text),
             Event::SoftBreak | Event::HardBreak => {}
             Event::Start(Tag::Emphasis) => {
-                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+                self.push_style(theme::inline_style(&self.theme.emphasis));
             }
             Event::Start(Tag::Strong) => {
-                self.push_style(Style::default().add_modifier(Modifier::BOLD));
+                self.push_style(theme::inline_style(&self.theme.strong));
             }
             Event::End(TagEnd::Emphasis | TagEnd::Strong) => self.pop_style(),
             Event::Start(Tag::Link { .. }) => {
-                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+                self.push_style(theme::inline_style(&self.theme.link));
             }
             Event::End(TagEnd::Link) => self.pop_style(),
             _ => {}
@@ -435,9 +412,9 @@ impl<'a> ParseContext<'a> {
             Event::Start(Tag::Table(alignments)) => self.start_table(alignments),
 
             // ── Inline passthrough ───────────────────────────────────
-            // Links: render text in the italic font slot; URL is ignored.
+            // Links: render text in the link style; URL is ignored.
             Event::Start(Tag::Link { .. }) => {
-                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+                self.push_style(theme::inline_style(&self.theme.link));
             }
             // Images: enter InImage state to accumulate alt text, then load on End.
             Event::Start(Tag::Image { dest_url, .. }) => {
@@ -449,13 +426,13 @@ impl<'a> ParseContext<'a> {
 
             // ── Inline formatting ────────────────────────────────────
             Event::Start(Tag::Emphasis) => {
-                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+                self.push_style(theme::inline_style(&self.theme.emphasis));
             }
             Event::Start(Tag::Strong) => {
-                self.push_style(Style::default().add_modifier(Modifier::BOLD));
+                self.push_style(theme::inline_style(&self.theme.strong));
             }
             Event::Start(Tag::Strikethrough) => {
-                self.push_style(Style::default().add_modifier(Modifier::CROSSED_OUT));
+                self.push_style(theme::inline_style(&self.theme.strikethrough));
             }
 
             // Any unrecognized block tag — skip until its matching End.
@@ -525,7 +502,7 @@ impl<'a> ParseContext<'a> {
 
     fn start_heading(&mut self, level: HeadingLevel) {
         let lvl = heading_level_to_u8(level);
-        self.style_stack.push(default_heading_style(lvl));
+        self.style_stack.push(theme::heading_style(&self.theme.heading[lvl as usize - 1]));
         self.current_spans.clear();
         self.state_stack.push(ParserState::InHeading { level: lvl });
     }
@@ -741,7 +718,7 @@ impl<'a> ParseContext<'a> {
 
     fn push_inline_code(&mut self, text: &str) {
         self.current_spans
-            .push(StyledSpan { text: text.to_string(), style: default_code_style() });
+            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline) });
     }
 
     fn push_soft_break(&mut self) {
@@ -767,8 +744,9 @@ pub fn parse(
     source: &str,
     highlighter: &crate::highlight::Highlighter,
     images: &mut crate::images::ImageManager,
+    theme: &MarkdownTheme,
 ) -> Vec<RenderedBlock> {
-    ParseContext::new(highlighter, images).process(source)
+    ParseContext::new(highlighter, images, theme).process(source)
 }
 
 /// Allows `ParserState` to be used in debug_assert messages.

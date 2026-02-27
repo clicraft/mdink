@@ -5,11 +5,12 @@
 //! `DocumentLine`s sized to fit a given terminal width.
 
 use pulldown_cmark::Alignment;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::parser::{ListItem, RenderedBlock, StyledSpan};
+use crate::theme::{self, MarkdownTheme};
 
 /// A pre-rendered document ready for viewport slicing and rendering.
 ///
@@ -45,7 +46,7 @@ pub enum DocumentLine {
 /// Each block is converted to one or more `DocumentLine`s. Text blocks
 /// are word-wrapped to fit within `width` columns. An `Empty` line is
 /// inserted between adjacent blocks for visual spacing.
-pub fn flatten(blocks: &[RenderedBlock], width: u16) -> PreRenderedDocument {
+pub fn flatten(blocks: &[RenderedBlock], width: u16, theme: &MarkdownTheme) -> PreRenderedDocument {
     let mut lines: Vec<DocumentLine> = Vec::new();
     // Clamp to minimum width of 1 to avoid undefined textwrap behavior.
     let width = (width as usize).max(1);
@@ -55,7 +56,7 @@ pub fn flatten(blocks: &[RenderedBlock], width: u16) -> PreRenderedDocument {
         if i > 0 {
             lines.push(DocumentLine::Empty);
         }
-        lines.extend(flatten_single_block(block, width, 0));
+        lines.extend(flatten_single_block(block, width, 0, theme));
     }
 
     let total_height = lines.len();
@@ -66,7 +67,7 @@ pub fn flatten(blocks: &[RenderedBlock], width: u16) -> PreRenderedDocument {
 ///
 /// `list_depth` is the current nesting depth of the enclosing list (0 = top-level).
 /// Used by `flatten_list` when recursively flattening child blocks.
-fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) -> Vec<DocumentLine> {
+fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, theme: &MarkdownTheme) -> Vec<DocumentLine> {
     match block {
         RenderedBlock::Heading { content, .. } => {
             let wrapped = wrap_styled_spans(content, width);
@@ -90,10 +91,7 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
             if !language.is_empty() {
                 let label = Span::styled(
                     format!(" {language} "),
-                    Style::default()
-                        .fg(Color::Indexed(245))
-                        .bg(Color::Indexed(235))
-                        .add_modifier(Modifier::ITALIC),
+                    theme::code_label_style(&theme.code_block),
                 );
                 result.push(DocumentLine::Code(Line::from(label)));
             }
@@ -108,11 +106,11 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
             (0..*count).map(|_| DocumentLine::Empty).collect()
         }
         RenderedBlock::List { ordered, start, items } => {
-            flatten_list(items, *ordered, *start, width, list_depth)
+            flatten_list(items, *ordered, *start, width, list_depth, theme)
         }
-        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth),
+        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth, theme),
         RenderedBlock::Table { headers, alignments, rows } => {
-            flatten_table(headers, alignments, rows, width)
+            flatten_table(headers, alignments, rows, width, theme)
         }
         // Phase 4: images are rendered by the renderer via StatefulImage.
         // Layout emits ImageStart for the first row (renderer draws there) and
@@ -137,7 +135,7 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
             let wrapped = wrap_styled_spans(
                 &[crate::parser::StyledSpan {
                     text: format!("[image: {}]", alt_text),
-                    style: Style::default().add_modifier(Modifier::DIM),
+                    style: theme::inline_style(&theme.image_alt),
                 }],
                 width,
             );
@@ -154,49 +152,62 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
 
 /// Flattens a list into `DocumentLine`s with bullet/number prefixes and indentation.
 ///
-/// Bullet characters by depth: `•` (0), `◦` (1), `▪` (2+).
+/// Bullet characters and task markers are configured by the theme.
 /// Ordered lists use `n.` where `n = start + index`.
-/// Task items use `☑` (checked) or `☐` (unchecked).
 fn flatten_list(
     items: &[ListItem],
     ordered: bool,
     start: u64,
     width: usize,
     depth: usize,
+    theme: &MarkdownTheme,
 ) -> Vec<DocumentLine> {
-    let indent = "  ".repeat(depth);
+    let indent = " ".repeat(theme.list.indent_size as usize * depth);
     let mut lines = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
-        let prefix_str = if let Some(checked) = item.task {
-            if checked { "☑".to_string() } else { "☐".to_string() }
-        } else if ordered {
-            format!("{}.", start + i as u64)
-        } else {
-            match depth {
-                0 => "•",
-                1 => "◦",
-                _ => "▪",
+        let (prefix_str, marker_style) = if let Some(checked) = item.task {
+            if checked {
+                (theme.list.task_checked.clone(), theme::list_task_checked_style(&theme.list))
+            } else {
+                (theme.list.task_unchecked.clone(), theme::list_task_unchecked_style(&theme.list))
             }
-            .to_string()
+        } else if ordered {
+            (format!("{}.", start + i as u64), theme::list_number_style(&theme.list))
+        } else {
+            let bullet = theme.list.bullet
+                .get(depth)
+                .or(theme.list.bullet.last())
+                .cloned()
+                .unwrap_or_else(|| "•".to_string());
+            (bullet, theme::list_bullet_style(&theme.list))
         };
 
         // First-line prefix: "{indent}{prefix} "
-        let first_prefix = format!("{indent}{prefix_str} ");
-        let first_prefix_width = first_prefix.width();
+        let first_prefix_width = indent.width() + prefix_str.width() + 1;
         // Continuation lines align with the start of the first line's content.
         let cont_prefix = " ".repeat(first_prefix_width);
 
         let content_width = width.saturating_sub(first_prefix_width).max(1);
         let wrapped = wrap_styled_spans(&item.content, content_width);
 
+        // Build the first-line prefix as styled spans: indent (raw) + marker (styled) + space (raw).
+        let prefix_spans = vec![
+            Span::raw(indent.clone()),
+            Span::styled(prefix_str, marker_style),
+            Span::raw(" ".to_string()),
+        ];
+
         if wrapped.is_empty() {
             // Empty item — emit just the prefix.
-            lines.push(DocumentLine::Text(Line::from(Span::raw(first_prefix))));
+            lines.push(DocumentLine::Text(Line::from(prefix_spans)));
         } else {
             for (j, content_line) in wrapped.into_iter().enumerate() {
-                let pref = if j == 0 { first_prefix.clone() } else { cont_prefix.clone() };
-                let mut spans = vec![Span::raw(pref)];
+                let mut spans = if j == 0 {
+                    prefix_spans.clone()
+                } else {
+                    vec![Span::raw(cont_prefix.clone())]
+                };
                 spans.extend(content_line.spans);
                 lines.push(DocumentLine::Text(Line::from(spans)));
             }
@@ -208,12 +219,12 @@ fn flatten_list(
         for child in &item.children {
             match child {
                 RenderedBlock::List { .. } => {
-                    let child_lines = flatten_single_block(child, width, depth + 1);
+                    let child_lines = flatten_single_block(child, width, depth + 1, theme);
                     lines.extend(child_lines);
                 }
                 _ => {
                     let child_width = width.saturating_sub(first_prefix_width).max(1);
-                    let child_lines = flatten_single_block(child, child_width, depth + 1);
+                    let child_lines = flatten_single_block(child, child_width, depth + 1, theme);
                     for line in child_lines {
                         match line {
                             DocumentLine::Text(l) => {
@@ -244,11 +255,12 @@ fn flatten_list(
 /// Every output line from each child block gets a `│ ` prefix applied.
 /// Nested block quotes recursively add another `│ ` level.
 /// The dim+italic modifier is merged into all text spans.
-fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usize) -> Vec<DocumentLine> {
-    const PREFIX: &str = "│ ";
-    const PREFIX_WIDTH: usize = 2; // "│ " is 2 display columns
-    let inner_width = width.saturating_sub(PREFIX_WIDTH).max(1);
-    let quote_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
+fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usize, theme: &MarkdownTheme) -> Vec<DocumentLine> {
+    let prefix = &theme.block_quote.prefix;
+    let prefix_width = prefix.width();
+    let inner_width = width.saturating_sub(prefix_width).max(1);
+    let prefix_style = theme::quote_prefix_style(&theme.block_quote);
+    let content_modifier = theme::quote_content_style(&theme.block_quote);
 
     let mut result = Vec::new();
 
@@ -256,41 +268,43 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usi
         // Visual spacing between child blocks inside the quote.
         if i > 0 {
             result.push(DocumentLine::Text(Line::from(Span::styled(
-                PREFIX.to_string(),
-                quote_style,
+                prefix.to_string(),
+                prefix_style,
             ))));
         }
         // Thread list_depth so nested lists inside block quotes render with
         // the correct bullet depth rather than resetting to depth 0.
-        let child_lines = flatten_single_block(child, inner_width, list_depth);
+        let child_lines = flatten_single_block(child, inner_width, list_depth, theme);
         for line in child_lines {
             match line {
                 DocumentLine::Text(l) => {
-                    let mut spans = vec![Span::styled(PREFIX.to_string(), quote_style)];
+                    let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
                     for span in l.spans {
                         spans.push(Span {
                             content: span.content,
-                            style: span.style.add_modifier(Modifier::DIM | Modifier::ITALIC),
+                            style: span.style.patch(content_modifier),
                         });
                     }
                     result.push(DocumentLine::Text(Line::from(spans)));
                 }
                 DocumentLine::Empty => {
                     result.push(DocumentLine::Text(Line::from(Span::styled(
-                        PREFIX.to_string(),
-                        quote_style,
+                        prefix.to_string(),
+                        prefix_style,
                     ))));
                 }
                 DocumentLine::Code(l) => {
                     // Code inside a block quote: add prefix but keep code formatting.
-                    let mut spans = vec![Span::styled(PREFIX.to_string(), quote_style)];
+                    let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
                     spans.extend(l.spans);
                     result.push(DocumentLine::Code(Line::from(spans)));
                 }
                 DocumentLine::Rule => {
+                    let rule_char = &theme.thematic_break.char_;
+                    let rule_width = rule_char.width().max(1);
                     result.push(DocumentLine::Text(Line::from(vec![
-                        Span::styled(PREFIX.to_string(), quote_style),
-                        Span::styled("─".repeat(inner_width), quote_style),
+                        Span::styled(prefix.to_string(), prefix_style),
+                        Span::styled(rule_char.repeat(inner_width / rule_width), prefix_style),
                     ])));
                 }
                 // Images inside block quotes: pass through with prefix.
@@ -317,6 +331,7 @@ fn flatten_table(
     alignments: &[Alignment],
     rows: &[Vec<Vec<StyledSpan>>],
     width: usize,
+    theme: &MarkdownTheme,
 ) -> Vec<DocumentLine> {
     let ncols = headers.len();
     if ncols == 0 {
@@ -351,8 +366,8 @@ fn flatten_table(
         }
     }
 
-    let header_style = Style::default().add_modifier(Modifier::BOLD);
-    let sep_style = Style::default().add_modifier(Modifier::DIM);
+    let header_style = theme::table_header_style(&theme.table);
+    let sep_style = theme::table_border_style(&theme.table);
 
     let mut result = Vec::new();
     result.push(DocumentLine::Text(Line::from(build_table_row(

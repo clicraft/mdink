@@ -11,6 +11,7 @@ mod images;
 mod layout;
 mod parser;
 mod renderer;
+mod theme;
 
 use std::fs;
 use std::path::Path;
@@ -48,6 +49,27 @@ fn main() -> color_eyre::Result<()> {
 
     // Parse CLI arguments.
     let cli = Cli::parse();
+
+    // Handle --list-themes early: print to stdout before terminal init, then exit.
+    if cli.list_themes {
+        println!("Built-in themes:");
+        println!("  dark      Dark background with bright colors (default)");
+        println!("  light     Light background with muted colors");
+        println!("  dracula   Dracula color palette");
+        println!();
+        println!("Custom themes: place .json files in ~/.config/mdink/themes/");
+        return Ok(());
+    }
+
+    // Resolve theme: --style flag > MDINK_STYLE env var > default theme.
+    let theme_name = cli
+        .style
+        .clone()
+        .or_else(|| std::env::var("MDINK_STYLE").ok());
+    let theme = match theme_name {
+        Some(name) => theme::load_theme(&name)?,
+        None => theme::default_theme(),
+    };
 
     // Guard against OOM: reject files that exceed a reasonable size threshold.
     // The check happens before ratatui::init() so the error prints to the normal
@@ -91,10 +113,10 @@ fn main() -> color_eyre::Result<()> {
     let mut image_manager = ImageManager::new(base_path, picker, cols);
 
     // Parse markdown into IR blocks (done once — blocks don't depend on width).
-    let blocks = parser::parse(&source, &highlighter, &mut image_manager);
+    let blocks = parser::parse(&source, &highlighter, &mut image_manager, &theme);
 
     // Flatten blocks into document lines at the current width.
-    let document = layout::flatten(&blocks, cols);
+    let document = layout::flatten(&blocks, cols, &theme);
 
     // Sanitize filename for display: strip control characters and ANSI escape
     // sequences so a crafted filename cannot inject terminal escape codes into
@@ -106,7 +128,7 @@ fn main() -> color_eyre::Result<()> {
         .collect::<String>();
 
     // Create the application state.
-    let mut app = App::new(document, safe_filename);
+    let mut app = App::new(document, safe_filename, theme);
 
     // Initialize the terminal (enters raw mode + alternate screen).
     // TERMINAL_ACTIVE must be set immediately after so the panic hook is correct.
@@ -149,7 +171,7 @@ fn run_event_loop(
             }
             Event::Resize(cols, _rows) => {
                 // Re-flatten at the new width (blocks are unchanged).
-                app.document = layout::flatten(blocks, cols);
+                app.document = layout::flatten(blocks, cols, &app.theme);
                 // Clamp scroll offset to the new max.
                 let max = app.max_scroll();
                 if app.scroll_offset > max {

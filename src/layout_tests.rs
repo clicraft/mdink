@@ -2,6 +2,11 @@
     use crate::parser::StyledSpan;
     use ratatui::style::{Color, Modifier, Style};
 
+    /// Wrapper that passes the default theme so existing tests don't need updating.
+    fn flatten_default(blocks: &[RenderedBlock], width: u16) -> PreRenderedDocument {
+        flatten(blocks, width, &crate::theme::default_theme())
+    }
+
     fn plain_span(text: &str) -> StyledSpan {
         StyledSpan {
             text: text.to_string(),
@@ -18,7 +23,7 @@
 
     #[test]
     fn test_layout_empty_blocks() {
-        let doc = flatten(&[], 80);
+        let doc = flatten_default(&[], 80);
         assert_eq!(doc.total_height, 0);
         assert!(doc.lines.is_empty());
     }
@@ -28,7 +33,7 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![plain_span("Hello world")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
         assert!(matches!(&doc.lines[0], DocumentLine::Text(_)));
     }
@@ -39,7 +44,7 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![plain_span(long_text.trim())],
         }];
-        let doc = flatten(&blocks, 40);
+        let doc = flatten_default(&blocks,40);
         assert!(
             doc.total_height > 1,
             "expected wrapping, got {} lines",
@@ -50,7 +55,7 @@
     #[test]
     fn test_layout_thematic_break() {
         let blocks = vec![RenderedBlock::ThematicBreak];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
         assert!(matches!(&doc.lines[0], DocumentLine::Rule));
     }
@@ -65,7 +70,7 @@
                 content: vec![plain_span("Second")],
             },
         ];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // First paragraph (1 line) + empty (1 line) + second paragraph (1 line) = 3
         assert_eq!(doc.total_height, 3);
         assert!(matches!(&doc.lines[1], DocumentLine::Empty));
@@ -80,7 +85,7 @@
                 Style::default().add_modifier(Modifier::BOLD),
             )],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
         assert!(matches!(&doc.lines[0], DocumentLine::Text(_)));
     }
@@ -88,7 +93,7 @@
     #[test]
     fn test_layout_spacer() {
         let blocks = vec![RenderedBlock::Spacer { lines: 3 }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 3);
         for line in &doc.lines {
             assert!(matches!(line, DocumentLine::Empty));
@@ -100,14 +105,14 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![plain_span("abcdefghijklmnopqrstuvwxyz")],
         }];
-        let doc = flatten(&blocks, 10);
+        let doc = flatten_default(&blocks,10);
         assert!(doc.total_height >= 2, "long word should wrap");
     }
 
     #[test]
     fn test_layout_empty_paragraph() {
         let blocks = vec![RenderedBlock::Paragraph { content: vec![] }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
     }
 
@@ -118,7 +123,7 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![styled_span(text.trim(), bold)],
         }];
-        let doc = flatten(&blocks, 40);
+        let doc = flatten_default(&blocks,40);
         for line in &doc.lines {
             if let DocumentLine::Text(l) = line {
                 for span in &l.spans {
@@ -137,7 +142,7 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![plain_span("aaa bbb aaa bbb aaa bbb")],
         }];
-        let doc = flatten(&blocks, 8);
+        let doc = flatten_default(&blocks,8);
         // Collect all text from the wrapped lines.
         let mut all_text = String::new();
         for line in &doc.lines {
@@ -164,7 +169,7 @@
                 styled_span("world this is long", italic),
             ],
         }];
-        let doc = flatten(&blocks, 12);
+        let doc = flatten_default(&blocks,12);
         assert!(doc.total_height >= 2, "should wrap");
         // First line should have bold "hello " and italic "world"
         if let DocumentLine::Text(first_line) = &doc.lines[0] {
@@ -178,7 +183,7 @@
             content: vec![plain_span("Hello 🌍 world 🎉 test 🚀 more text here for wrapping")],
         }];
         // Should not panic on emoji at any width.
-        let doc = flatten(&blocks, 15);
+        let doc = flatten_default(&blocks,15);
         assert!(doc.total_height >= 1);
     }
 
@@ -187,7 +192,7 @@
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![plain_span("日本語のテキスト処理テスト")],
         }];
-        let doc = flatten(&blocks, 10);
+        let doc = flatten_default(&blocks,10);
         assert!(doc.total_height >= 1);
     }
 
@@ -197,7 +202,7 @@
             content: vec![plain_span("text")],
         }];
         // Width 0 is clamped to 1 — should not panic.
-        let doc = flatten(&blocks, 0);
+        let doc = flatten_default(&blocks,0);
         assert!(doc.total_height >= 1);
     }
 
@@ -212,7 +217,7 @@
                 styled_span(" for formatting output in your programs", bold),
             ],
         }];
-        let doc = flatten(&blocks, 20);
+        let doc = flatten_default(&blocks,20);
         // Collect all text.
         let mut all_text = String::new();
         for line in &doc.lines {
@@ -243,7 +248,7 @@
             language: String::new(),
             highlighted_lines: vec![make_code_line(&long_line)],
         }];
-        let doc = flatten(&blocks, 40);
+        let doc = flatten_default(&blocks,40);
         // Code lines should NOT wrap — still 1 Code line.
         let code_count = doc
             .lines
@@ -259,7 +264,7 @@
             language: String::new(),
             highlighted_lines: vec![make_code_line("code")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // No language → no label line, just the code line.
         assert_eq!(doc.total_height, 1);
     }
@@ -274,7 +279,7 @@
                 make_code_line("}"),
             ],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // 1 label + 3 code lines = 4
         assert_eq!(doc.total_height, 4);
         // First line should be the label.
@@ -295,7 +300,7 @@
                 make_code_line("    pass"),
             ],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // 1 label + 2 code lines = 3
         let code_count = doc
             .lines
@@ -330,7 +335,7 @@
             start: 1,
             items: vec![make_list_item("alpha"), make_list_item("beta")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 2);
         // Both lines should be Text lines with bullet prefix.
         for line in &doc.lines {
@@ -350,7 +355,7 @@
             start: 3,
             items: vec![make_list_item("first"), make_list_item("second")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 2);
         if let DocumentLine::Text(first_line) = &doc.lines[0] {
             let text: String = first_line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -383,7 +388,7 @@
             start: 1,
             items: vec![outer_item],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 2, "outer item + nested item");
         // Nested item should use ◦ bullet and extra indentation.
         if let DocumentLine::Text(nested_line) = &doc.lines[1] {
@@ -399,7 +404,7 @@
             start: 1,
             items: vec![make_task_item("done", true), make_task_item("pending", false)],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 2);
         if let DocumentLine::Text(l) = &doc.lines[0] {
             let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -422,7 +427,7 @@
         let blocks = vec![RenderedBlock::BlockQuote {
             children: vec![make_paragraph_block("Quoted text")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert!(!doc.lines.is_empty());
         for line in &doc.lines {
             if let DocumentLine::Text(l) = line {
@@ -437,7 +442,7 @@
         let blocks = vec![RenderedBlock::BlockQuote {
             children: vec![make_paragraph_block("Hello from the quote")],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         let all_text: String = doc.lines.iter().filter_map(|l| {
             if let DocumentLine::Text(line) = l {
                 Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -456,7 +461,7 @@
         let blocks = vec![RenderedBlock::BlockQuote {
             children: vec![inner],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         let has_double_prefix = doc.lines.iter().any(|l| {
             if let DocumentLine::Text(line) = l {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -484,7 +489,7 @@
             ],
             rows: vec![vec![make_cell("foo"), make_cell("42")]],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // Header + separator + 1 data row = 3 lines.
         assert_eq!(doc.total_height, 3);
         for line in &doc.lines {
@@ -499,7 +504,7 @@
             alignments: vec![pulldown_cmark::Alignment::None],
             rows: vec![vec![make_cell("val")]],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // Second line is the separator.
         if let DocumentLine::Text(sep_line) = &doc.lines[1] {
             let text: String = sep_line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -516,7 +521,7 @@
         let alignments = vec![pulldown_cmark::Alignment::None; 20];
         let rows = vec![(0..20).map(|i| make_cell(&format!("cell{i}"))).collect()];
         let blocks = vec![RenderedBlock::Table { headers, alignments, rows }];
-        let doc = flatten(&blocks, 40);
+        let doc = flatten_default(&blocks,40);
         assert!(doc.total_height >= 3, "should still produce header/sep/row lines");
     }
 
@@ -528,7 +533,7 @@
             alignments: vec![Alignment::Right],
             rows: vec![vec![make_cell("hi")]],
         }];
-        let doc = flatten(&blocks, 40);
+        let doc = flatten_default(&blocks,40);
         // Just verify it doesn't panic and produces 3 lines.
         assert_eq!(doc.total_height, 3);
     }
@@ -544,7 +549,7 @@
             alignments: vec![Alignment::None, Alignment::None],
             rows: vec![vec![make_cell("abc"), make_cell("42")]],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // Must not panic and must produce header + separator + 1 row.
         assert_eq!(doc.total_height, 3);
         // The header row's rendered text must contain the CJK characters.
@@ -573,7 +578,7 @@
             start: 1,
             items: vec![item],
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         // Should be: item text line + code line (indented)
         assert!(doc.total_height >= 2);
         // The code line should be a Code variant with an indent prefix span.
@@ -597,7 +602,7 @@
         let blocks = vec![RenderedBlock::ImageFallback {
             alt_text: "a photo".to_string(),
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
         if let DocumentLine::Text(line) = &doc.lines[0] {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -618,7 +623,7 @@
             width_cells: 16,
             height_cells: 5,
         }];
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 5, "image should reserve height_cells lines");
         assert!(
             matches!(&doc.lines[0], DocumentLine::ImageStart { protocol_index: 0, height: 5 }),
@@ -659,6 +664,6 @@
             items: vec![outer_item],
         }];
         // Must not panic.
-        let doc = flatten(&blocks, 80);
+        let doc = flatten_default(&blocks,80);
         assert!(doc.total_height >= 2);
     }

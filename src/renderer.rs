@@ -9,7 +9,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui_image::StatefulImage;
@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::images::ImageManager;
 use crate::layout::DocumentLine;
+use crate::theme;
 
 /// Draws the current view of the document and status bar to the frame.
 ///
@@ -62,12 +63,19 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     frame.render_widget(paragraph, line_area);
                 }
                 DocumentLine::Code(line) => {
-                    let code_bg = Color::Indexed(235);
+                    let code_bg = theme::code_block_bg(&app.theme.code_block);
                     // Override background on every span and add left padding.
-                    let mut spans = vec![Span::styled(" ", Style::default().bg(code_bg))];
+                    let bg_style = Style::default().bg(code_bg.unwrap_or_default());
+                    let mut spans = if code_bg.is_some() {
+                        vec![Span::styled(" ", bg_style)]
+                    } else {
+                        vec![Span::raw(" ".to_string())]
+                    };
                     for span in &line.spans {
                         let mut style = span.style;
-                        style.bg = Some(code_bg);
+                        if let Some(bg) = code_bg {
+                            style.bg = Some(bg);
+                        }
                         spans.push(Span::styled(span.content.to_string(), style));
                     }
                     // Fill remaining width with background.
@@ -75,10 +83,10 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     // characters correctly (e.g. Unicode operators, CJK, arrows).
                     let used: usize = spans.iter().map(|s| s.content.width()).sum();
                     let remaining = (content_area.width as usize).saturating_sub(used);
-                    if remaining > 0 {
+                    if remaining > 0 && code_bg.is_some() {
                         spans.push(Span::styled(
                             " ".repeat(remaining),
-                            Style::default().bg(code_bg),
+                            bg_style,
                         ));
                     }
                     let code_line = Line::from(spans);
@@ -89,9 +97,11 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     // Nothing to render — blank line.
                 }
                 DocumentLine::Rule => {
-                    let rule_char = "─".repeat(content_area.width as usize);
+                    let char_ = &app.theme.thematic_break.char_;
+                    let char_width = char_.width().max(1);
+                    let rule_char = char_.repeat(content_area.width as usize / char_width);
                     let rule_line =
-                        Line::from(Span::styled(rule_char, Style::default().add_modifier(Modifier::DIM)));
+                        Line::from(Span::styled(rule_char, theme::rule_style(&app.theme.thematic_break)));
                     let paragraph = Paragraph::new(rule_line);
                     frame.render_widget(paragraph, line_area);
                 }
@@ -146,10 +156,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.filename, percent, current_line, total_lines
     );
 
-    let status_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let status_style = theme::status_bar_style(&app.theme.status_bar);
 
     // Pad the status text to fill the entire width.
     let padded = format!("{:<width$}", status_text, width = area.width as usize);

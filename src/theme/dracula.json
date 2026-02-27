@@ -1,0 +1,55 @@
+{
+  "name": "dracula",
+  "heading": [
+    { "fg": "#bd93f9", "bold": true },
+    { "fg": "#50fa7b", "bold": true },
+    { "fg": "#ff79c6", "bold": true },
+    { "fg": "#8be9fd", "bold": true, "italic": true },
+    { "fg": "#8be9fd", "bold": true, "italic": true },
+    { "fg": "#8be9fd", "bold": true, "italic": true }
+  ],
+  "code_block": {
+    "bg": "#282a36",
+    "label_fg": "#6272a4",
+    "label_bg": "#282a36",
+    "label_italic": true
+  },
+  "code_inline": {
+    "fg": "#f8f8f2",
+    "bg": "#44475a",
+    "bold": true,
+    "italic": true
+  },
+  "emphasis": { "italic": true },
+  "strong": { "bold": true },
+  "strikethrough": { "strikethrough": true },
+  "link": { "italic": true, "fg": "#8be9fd" },
+  "image_alt": { "dim": true },
+  "block_quote": {
+    "prefix": "│ ",
+    "italic": true,
+    "dim": true,
+    "border_fg": "#6272a4"
+  },
+  "thematic_break": {
+    "char": "─",
+    "dim": true,
+    "fg": "#6272a4"
+  },
+  "list": {
+    "bullet": ["•", "◦", "▪"],
+    "task_checked": "☑",
+    "task_unchecked": "☐",
+    "indent_size": 2
+  },
+  "table": {
+    "header_bold": true,
+    "border_dim": true
+  },
+  "status_bar": {
+    "fg": "#f8f8f2",
+    "bg": "#44475a",
+    "bold": true
+  },
+  "syntect_theme": "base16-eighties.dark"
+}

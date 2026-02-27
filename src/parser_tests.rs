@@ -1,4 +1,5 @@
     use super::*;
+    use ratatui::style::Modifier;
     use std::sync::LazyLock;
 
     static TEST_HIGHLIGHTER: LazyLock<crate::highlight::Highlighter> =
@@ -16,7 +17,8 @@
             None, // no Picker → all images degrade to ImageFallback
             80,
         );
-        super::parse(source, highlighter, &mut im)
+        let theme = crate::theme::default_theme();
+        super::parse(source, highlighter, &mut im, &theme)
     }
 
     #[test]
@@ -131,7 +133,7 @@
                 assert_eq!(content.len(), 3);
                 assert_eq!(content[0].text, "Use ");
                 assert_eq!(content[1].text, "fmt");
-                assert_eq!(content[1].style, default_code_style());
+                assert_eq!(content[1].style, crate::theme::inline_style(&crate::theme::default_theme().code_inline));
                 assert_eq!(content[2].text, " here");
             }
             _ => panic!("expected Paragraph block"),
@@ -180,9 +182,10 @@
 
     #[test]
     fn test_parser_heading_styles_are_distinct() {
-        let s1 = default_heading_style(1);
-        let s2 = default_heading_style(2);
-        let s3 = default_heading_style(3);
+        let t = crate::theme::default_theme();
+        let s1 = crate::theme::heading_style(&t.heading[0]);
+        let s2 = crate::theme::heading_style(&t.heading[1]);
+        let s3 = crate::theme::heading_style(&t.heading[2]);
         assert_ne!(s1.fg, s2.fg);
         assert_ne!(s2.fg, s3.fg);
     }
@@ -424,8 +427,9 @@
 
     #[test]
     fn test_parser_heading_styles_distinct_modifiers() {
-        let h1 = default_heading_style(1);
-        let h4 = default_heading_style(4);
+        let t = crate::theme::default_theme();
+        let h1 = crate::theme::heading_style(&t.heading[0]);
+        let h4 = crate::theme::heading_style(&t.heading[3]);
         // h1 has BOLD only
         assert!(h1.add_modifier.contains(Modifier::BOLD));
         assert!(!h1.add_modifier.contains(Modifier::ITALIC));
@@ -436,7 +440,7 @@
 
     #[test]
     fn test_parser_inline_code_has_bold_italic() {
-        let style = default_code_style();
+        let style = crate::theme::inline_style(&crate::theme::default_theme().code_inline);
         assert!(
             style.add_modifier.contains(Modifier::BOLD),
             "inline code should have BOLD"
@@ -765,8 +769,9 @@
         use crate::layout::flatten;
         let source = include_str!("../testdata/stress-test.md");
         let blocks = parse(source, h());
+        let theme = crate::theme::default_theme();
         for width in [20u16, 40, 80, 120, 220] {
-            let doc = flatten(&blocks, width);
+            let doc = flatten(&blocks, width, &theme);
             assert!(
                 doc.total_height > 0,
                 "layout at width={width} should produce lines"

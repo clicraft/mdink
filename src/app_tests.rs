@@ -10,7 +10,11 @@
     }
 
     fn make_app(doc_lines: usize, viewport: usize) -> App {
-        let mut app = App::new(make_doc(doc_lines), "test.md".to_string());
+        let mut app = App::new(
+            make_doc(doc_lines),
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+        );
         app.viewport_height = viewport;
         app
     }

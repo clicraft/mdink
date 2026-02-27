@@ -17,5 +17,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_images: bool,
 
-    // Later phases will add: --style, --width, --pager, --list-themes
+    /// Theme: dark, light, dracula, or path to JSON file.
+    #[arg(short = 's', long = "style")]
+    pub style: Option<String>,
+
+    /// List available built-in themes and exit.
+    #[arg(long)]
+    pub list_themes: bool,
 }
