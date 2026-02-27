@@ -254,6 +254,38 @@
         }
     }
 
+    // ── Phase 4: Image tests ───────────────────────────────────
+
+    #[test]
+    fn test_parser_image_no_picker_produces_fallback() {
+        // The test wrapper uses None picker, so all images degrade to fallback.
+        let blocks = parse("![Photo of sunset](sunset.png)", h());
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "should produce ImageFallback when picker is None");
+        if let Some(RenderedBlock::ImageFallback { alt_text }) = fallback {
+            assert_eq!(alt_text, "Photo of sunset");
+        }
+    }
+
+    #[test]
+    fn test_parser_image_empty_alt_text() {
+        let blocks = parse("![](photo.png)", h());
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "should produce ImageFallback even with empty alt");
+        if let Some(RenderedBlock::ImageFallback { alt_text }) = fallback {
+            assert!(alt_text.is_empty(), "alt text should be empty, got: {alt_text:?}");
+        }
+    }
+
+    #[test]
+    fn test_parser_image_inline_with_text() {
+        // Markdown: paragraph text with an inline image.
+        let blocks = parse("Before ![img](x.png) after", h());
+        // Should have some text and an ImageFallback.
+        let has_fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(has_fallback, "inline image should produce ImageFallback");
+    }
+
     // ── Phase 2: Code block tests ───────────────────────────────
 
     #[test]

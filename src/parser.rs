@@ -52,6 +52,22 @@ pub enum RenderedBlock {
         /// Body rows (one `Vec<Vec<StyledSpan>>` per row, inner vec = columns).
         rows: Vec<Vec<Vec<StyledSpan>>>,
     },
+    /// A successfully loaded image with a terminal graphics protocol.
+    Image {
+        /// Index into `ImageManager::protocols` for renderer access.
+        protocol_index: usize,
+        /// Alt text for accessibility / fallback display.
+        alt_text: String,
+        /// Image width in terminal cell columns.
+        width_cells: u16,
+        /// Image height in terminal cell rows.
+        height_cells: u16,
+    },
+    /// An image that could not be loaded (missing file, no graphics support, etc.).
+    ImageFallback {
+        /// Alt text to display in place of the image.
+        alt_text: String,
+    },
 }
 
 /// A single item in an ordered or unordered list.
@@ -100,6 +116,8 @@ enum ParserState {
     InListItem { children: Vec<RenderedBlock>, task: Option<bool> },
     /// Inside a block quote; accumulating child blocks.
     InBlockQuote { children: Vec<RenderedBlock> },
+    /// Inside an image tag; accumulating alt text. Image is loaded on End(Image).
+    InImage { dest_url: String, alt_buffer: String },
     /// Inside a GFM table; accumulating header/body cells row by row.
     InTable {
         headers: Vec<Vec<StyledSpan>>,
@@ -167,6 +185,7 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 /// the final `Vec<RenderedBlock>`. Not part of the public API.
 struct ParseContext<'a> {
     highlighter: &'a crate::highlight::Highlighter,
+    images: &'a mut crate::images::ImageManager,
     blocks: Vec<RenderedBlock>,
     /// Block-level state machine (never empty while parsing).
     state_stack: Vec<ParserState>,
@@ -183,9 +202,13 @@ struct ParseContext<'a> {
 }
 
 impl<'a> ParseContext<'a> {
-    fn new(highlighter: &'a crate::highlight::Highlighter) -> Self {
+    fn new(
+        highlighter: &'a crate::highlight::Highlighter,
+        images: &'a mut crate::images::ImageManager,
+    ) -> Self {
         Self {
             highlighter,
+            images,
             blocks: Vec::new(),
             state_stack: vec![ParserState::TopLevel],
             style_stack: Vec::new(),
@@ -218,6 +241,8 @@ impl<'a> ParseContext<'a> {
     fn on_event(&mut self, event: Event) {
         if matches!(self.state_stack.last(), Some(ParserState::InCodeBlock { .. })) {
             self.on_code_block_event(event);
+        } else if matches!(self.state_stack.last(), Some(ParserState::InImage { .. })) {
+            self.on_image_event(event);
         } else if matches!(self.state_stack.last(), Some(ParserState::Skipping { .. })) {
             self.on_skipping_event(event);
         } else if matches!(self.state_stack.last(), Some(ParserState::InTable { .. })) {
@@ -253,6 +278,45 @@ impl<'a> ParseContext<'a> {
                 }
             }
             // Ignore all other events (syntax, meta) inside a code block.
+            _ => {}
+        }
+    }
+
+    /// Handles events when inside an image tag.
+    ///
+    /// Accumulates alt text; on `End(Image)` attempts to load the image
+    /// via `ImageManager`. Falls back to `ImageFallback` on any error.
+    fn on_image_event(&mut self, event: Event) {
+        match event {
+            Event::Text(text) => {
+                if let Some(ParserState::InImage { alt_buffer, .. }) =
+                    self.state_stack.last_mut()
+                {
+                    alt_buffer.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(ParserState::InImage { dest_url, alt_buffer }) =
+                    self.state_stack.pop()
+                {
+                    match self.images.load_image(&dest_url) {
+                        Ok((protocol_index, width_cells, height_cells)) => {
+                            self.emit_block(RenderedBlock::Image {
+                                protocol_index,
+                                alt_text: alt_buffer,
+                                width_cells,
+                                height_cells,
+                            });
+                        }
+                        Err(_) => {
+                            self.emit_block(RenderedBlock::ImageFallback {
+                                alt_text: alt_buffer,
+                            });
+                        }
+                    }
+                }
+            }
+            // Images don't contain block-level content — ignore everything else.
             _ => {}
         }
     }
@@ -375,8 +439,13 @@ impl<'a> ParseContext<'a> {
             Event::Start(Tag::Link { .. }) => {
                 self.push_style(Style::default().add_modifier(Modifier::ITALIC));
             }
-            // Images: show alt text unstyled (no style push).
-            Event::Start(Tag::Image { .. }) => {}
+            // Images: enter InImage state to accumulate alt text, then load on End.
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.state_stack.push(ParserState::InImage {
+                    dest_url: dest_url.to_string(),
+                    alt_buffer: String::new(),
+                });
+            }
 
             // ── Inline formatting ────────────────────────────────────
             Event::Start(Tag::Emphasis) => {
@@ -402,7 +471,7 @@ impl<'a> ParseContext<'a> {
 
             // ── Inline end ───────────────────────────────────────────
             Event::End(TagEnd::Link) => self.pop_style(),
-            Event::End(TagEnd::Image) => {}
+            // End(Image) is handled by on_image_event — should not reach here.
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 self.pop_style();
             }
@@ -691,10 +760,15 @@ impl<'a> ParseContext<'a> {
 /// Parses a markdown source string into the RenderedBlock IR.
 ///
 /// Enables GFM extensions (strikethrough, tables, tasklists) so that
-/// user markdown containing these features doesn't break — even though
-/// tables and lists aren't rendered until later phases.
-pub fn parse(source: &str, highlighter: &crate::highlight::Highlighter) -> Vec<RenderedBlock> {
-    ParseContext::new(highlighter).process(source)
+/// user markdown containing these features doesn't break.
+/// Images are loaded via `images` during parsing; if loading fails
+/// they degrade to `ImageFallback` blocks.
+pub fn parse(
+    source: &str,
+    highlighter: &crate::highlight::Highlighter,
+    images: &mut crate::images::ImageManager,
+) -> Vec<RenderedBlock> {
+    ParseContext::new(highlighter, images).process(source)
 }
 
 /// Allows `ParserState` to be used in debug_assert messages.
@@ -712,6 +786,7 @@ impl std::fmt::Debug for ParserState {
             ParserState::InList { ordered, .. } => write!(f, "InList(ordered={ordered})"),
             ParserState::InListItem { .. } => write!(f, "InListItem"),
             ParserState::InBlockQuote { .. } => write!(f, "InBlockQuote"),
+            ParserState::InImage { dest_url, .. } => write!(f, "InImage({dest_url})"),
             ParserState::InTable { .. } => write!(f, "InTable"),
         }
     }

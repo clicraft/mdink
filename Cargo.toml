@@ -21,9 +21,9 @@ textwrap = "0.16"
 color-eyre = "0.6"
 # Phase 2
 syntect = "5.2"
-# Phase 4 (commented until needed)
-# ratatui-image = { version = "10", default-features = false, features = ["image-defaults", "crossterm"] }
-# image = "0.25"
+# Phase 4
+ratatui-image = { version = "10", default-features = false, features = ["image-defaults", "crossterm"] }
+image = "0.25"
 # Phase 5 (commented until needed)
 # serde = { version = "1", features = ["derive"] }
 # serde_json = "1"

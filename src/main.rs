@@ -7,11 +7,13 @@
 mod app;
 mod cli;
 mod highlight;
+mod images;
 mod layout;
 mod parser;
 mod renderer;
 
 use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
@@ -19,6 +21,7 @@ use ratatui::crossterm::event::{self, Event};
 
 use crate::app::App;
 use crate::cli::Cli;
+use crate::images::ImageManager;
 use crate::parser::RenderedBlock;
 
 /// Set to `true` immediately after `ratatui::init()` so the panic hook knows
@@ -66,11 +69,29 @@ fn main() -> color_eyre::Result<()> {
     // Load syntax highlighting resources (expensive, done once).
     let highlighter = highlight::Highlighter::new();
 
-    // Parse markdown into IR blocks (done once — blocks don't depend on width).
-    let blocks = parser::parse(&source, &highlighter);
-
-    // Get initial terminal size for layout.
+    // Get terminal size early — needed for image cell dimension computation.
     let (cols, _rows) = ratatui::crossterm::terminal::size()?;
+
+    // Query terminal for graphics protocol support (Sixel/Kitty/iTerm2/halfblocks).
+    // from_query_stdio() requires raw mode, so we enable it briefly and disable
+    // before ratatui::init() takes over. Failure is non-fatal: images fall back to alt text.
+    let picker = if cli.no_images {
+        None
+    } else {
+        ratatui::crossterm::terminal::enable_raw_mode().ok();
+        let p = ratatui_image::picker::Picker::from_query_stdio().ok();
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        p
+    };
+
+    let base_path = Path::new(&cli.file)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let mut image_manager = ImageManager::new(base_path, picker, cols);
+
+    // Parse markdown into IR blocks (done once — blocks don't depend on width).
+    let blocks = parser::parse(&source, &highlighter, &mut image_manager);
 
     // Flatten blocks into document lines at the current width.
     let document = layout::flatten(&blocks, cols);
@@ -93,7 +114,7 @@ fn main() -> color_eyre::Result<()> {
     TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
 
     // Main event loop.
-    let result = run_event_loop(&mut terminal, &mut app, &blocks);
+    let result = run_event_loop(&mut terminal, &mut app, &blocks, &mut image_manager);
 
     // Always restore the terminal, even if the loop returned an error.
     ratatui::restore();
@@ -110,13 +131,14 @@ fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     blocks: &[RenderedBlock],
+    image_manager: &mut ImageManager,
 ) -> color_eyre::Result<()> {
     loop {
         // Update viewport height from current terminal size.
         app.viewport_height = terminal.size()?.height.saturating_sub(1) as usize;
 
         // Draw the current frame.
-        terminal.draw(|frame| renderer::draw(frame, app))?;
+        terminal.draw(|frame| renderer::draw(frame, app, image_manager))?;
 
         // Block until the next event.
         let event = event::read()?;

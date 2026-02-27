@@ -13,5 +13,9 @@ pub struct Cli {
     /// Markdown file to render (use "-" for stdin).
     pub file: String,
 
-    // Later phases will add: --style, --width, --pager, --no-images, --list-themes
+    /// Disable image rendering (show alt text instead).
+    #[arg(long)]
+    pub no_images: bool,
+
+    // Later phases will add: --style, --width, --pager, --list-themes
 }

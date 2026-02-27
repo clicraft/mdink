@@ -590,6 +590,48 @@
         }
     }
 
+    // ── Phase 4: Image layout tests ────────────────────────────
+
+    #[test]
+    fn test_layout_image_fallback_produces_text() {
+        let blocks = vec![RenderedBlock::ImageFallback {
+            alt_text: "a photo".to_string(),
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 1);
+        if let DocumentLine::Text(line) = &doc.lines[0] {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains("a photo"),
+                "fallback should contain alt text, got: {text}"
+            );
+        } else {
+            panic!("expected Text line for ImageFallback");
+        }
+    }
+
+    #[test]
+    fn test_layout_image_start_reserves_height() {
+        let blocks = vec![RenderedBlock::Image {
+            protocol_index: 0,
+            alt_text: "test".to_string(),
+            width_cells: 16,
+            height_cells: 5,
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 5, "image should reserve height_cells lines");
+        assert!(
+            matches!(&doc.lines[0], DocumentLine::ImageStart { protocol_index: 0, height: 5 }),
+            "first line should be ImageStart"
+        );
+        for i in 1..5 {
+            assert!(
+                matches!(&doc.lines[i], DocumentLine::ImageContinuation),
+                "line {i} should be ImageContinuation"
+            );
+        }
+    }
+
     #[test]
     fn test_layout_block_quote_inside_list_preserves_list_depth() {
         // A block quote inside a list item (depth=1) should thread list_depth
