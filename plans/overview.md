@@ -16,11 +16,12 @@
 | [initial_plan.md](initial_plan.md) | Original project vision, architecture, data types, reference projects |
 | [phase1_minimal_renderer.md](phase1_minimal_renderer.md) | Project scaffold + basic text rendering + scrolling |
 | [phase2_code_blocks.md](phase2_code_blocks.md) | Syntax-highlighted code blocks via syntect |
-| [phase3_lists_quotes_tables.md](phase3_lists_quotes_tables.md) | Structured block elements with nesting |
+| [phase3_lists_quotes_tables.md](phase3_lists_quotes_tables.md) | Structured block elements with nesting ✓ |
 | [phase4_images.md](phase4_images.md) | Terminal image support (Sixel/Kitty/iTerm2/halfblocks) |
 | [phase5_theming.md](phase5_theming.md) | JSON theming system with 3 built-in themes |
 | [phase6_polish.md](phase6_polish.md) | Links, footnotes, search, heading nav, pager mode |
 | [phase7_packaging.md](phase7_packaging.md) | CI/CD, curl installer, .deb/apt, man pages, completions |
+| [font_slot_strategy.md](font_slot_strategy.md) | Terminal font slot mapping for typographic hierarchy (Stage 1: immediate, Stage 2: Phase 5) |
 
 ---
 
@@ -97,6 +98,7 @@ mdink/
 - **Phase 5 changes ALL prior code:** Every style-producing function takes `&MarkdownTheme`. This is the most invasive refactor.
 - **Phase 7 requires `src/cli.rs` from Phase 1:** The xtask imports the `Cli` struct. This is why Phase 1 separates `cli.rs` from `main.rs`.
 - **Recommendation:** Even during Phase 1, define a minimal `Theme` struct with hardcoded values so Phase 5 becomes "extend fields" rather than "thread a new parameter everywhere."
+- **Font slot strategy has two stages:** Stage 1 (modifier changes to `parser.rs` + comment detection in `highlight.rs`) can be applied immediately after Phase 2. Stage 2 (theme-configurable slot assignments + `strong_uses_bold_italic` flag) integrates with Phase 5. See [font_slot_strategy.md](font_slot_strategy.md).
 
 ---
 

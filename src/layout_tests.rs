@@ -304,3 +304,231 @@
             .count();
         assert_eq!(code_count, 3);
     }
+
+    // ── Phase 3: List layout tests ───────────────────────────────
+
+    fn make_list_item(text: &str) -> crate::parser::ListItem {
+        crate::parser::ListItem {
+            content: vec![plain_span(text)],
+            children: vec![],
+            task: None,
+        }
+    }
+
+    fn make_task_item(text: &str, checked: bool) -> crate::parser::ListItem {
+        crate::parser::ListItem {
+            content: vec![plain_span(text)],
+            children: vec![],
+            task: Some(checked),
+        }
+    }
+
+    #[test]
+    fn test_layout_unordered_list_bullet_prefix() {
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![make_list_item("alpha"), make_list_item("beta")],
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 2);
+        // Both lines should be Text lines with bullet prefix.
+        for line in &doc.lines {
+            if let DocumentLine::Text(l) = line {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(text.contains('•'), "unordered item should have • prefix, got: {text}");
+            } else {
+                panic!("expected Text line");
+            }
+        }
+    }
+
+    #[test]
+    fn test_layout_ordered_list_number_prefix() {
+        let blocks = vec![RenderedBlock::List {
+            ordered: true,
+            start: 3,
+            items: vec![make_list_item("first"), make_list_item("second")],
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 2);
+        if let DocumentLine::Text(first_line) = &doc.lines[0] {
+            let text: String = first_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.starts_with("3."), "ordered list should start at 3, got: {text}");
+        }
+        if let DocumentLine::Text(second_line) = &doc.lines[1] {
+            let text: String = second_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.starts_with("4."), "second item should be 4., got: {text}");
+        }
+    }
+
+    #[test]
+    fn test_layout_nested_list_indentation() {
+        let inner_item = crate::parser::ListItem {
+            content: vec![plain_span("nested")],
+            children: vec![],
+            task: None,
+        };
+        let outer_item = crate::parser::ListItem {
+            content: vec![plain_span("outer")],
+            children: vec![RenderedBlock::List {
+                ordered: false,
+                start: 1,
+                items: vec![inner_item],
+            }],
+            task: None,
+        };
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![outer_item],
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 2, "outer item + nested item");
+        // Nested item should use ◦ bullet and extra indentation.
+        if let DocumentLine::Text(nested_line) = &doc.lines[1] {
+            let text: String = nested_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains('◦'), "nested item should use ◦ bullet, got: {text}");
+        }
+    }
+
+    #[test]
+    fn test_layout_task_list_checkbox_prefix() {
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![make_task_item("done", true), make_task_item("pending", false)],
+        }];
+        let doc = flatten(&blocks, 80);
+        assert_eq!(doc.total_height, 2);
+        if let DocumentLine::Text(l) = &doc.lines[0] {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains('☑'), "checked task should have ☑, got: {text}");
+        }
+        if let DocumentLine::Text(l) = &doc.lines[1] {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains('☐'), "unchecked task should have ☐, got: {text}");
+        }
+    }
+
+    // ── Phase 3: Block quote layout tests ────────────────────────
+
+    fn make_paragraph_block(text: &str) -> RenderedBlock {
+        RenderedBlock::Paragraph { content: vec![plain_span(text)] }
+    }
+
+    #[test]
+    fn test_layout_block_quote_pipe_prefix() {
+        let blocks = vec![RenderedBlock::BlockQuote {
+            children: vec![make_paragraph_block("Quoted text")],
+        }];
+        let doc = flatten(&blocks, 80);
+        assert!(!doc.lines.is_empty());
+        for line in &doc.lines {
+            if let DocumentLine::Text(l) = line {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(text.starts_with("│ "), "block quote lines must start with │ , got: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_layout_block_quote_content_preserved() {
+        let blocks = vec![RenderedBlock::BlockQuote {
+            children: vec![make_paragraph_block("Hello from the quote")],
+        }];
+        let doc = flatten(&blocks, 80);
+        let all_text: String = doc.lines.iter().filter_map(|l| {
+            if let DocumentLine::Text(line) = l {
+                Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            } else {
+                None
+            }
+        }).collect();
+        assert!(all_text.contains("Hello from the quote"));
+    }
+
+    #[test]
+    fn test_layout_nested_block_quote_double_prefix() {
+        let inner = RenderedBlock::BlockQuote {
+            children: vec![make_paragraph_block("inner")],
+        };
+        let blocks = vec![RenderedBlock::BlockQuote {
+            children: vec![inner],
+        }];
+        let doc = flatten(&blocks, 80);
+        let has_double_prefix = doc.lines.iter().any(|l| {
+            if let DocumentLine::Text(line) = l {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.starts_with("│ │ ")
+            } else {
+                false
+            }
+        });
+        assert!(has_double_prefix, "nested quote should produce │ │  prefix");
+    }
+
+    // ── Phase 3: Table layout tests ──────────────────────────────
+
+    fn make_cell(text: &str) -> Vec<StyledSpan> {
+        vec![plain_span(text)]
+    }
+
+    #[test]
+    fn test_layout_table_produces_header_separator_and_rows() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Name"), make_cell("Value")],
+            alignments: vec![
+                pulldown_cmark::Alignment::None,
+                pulldown_cmark::Alignment::None,
+            ],
+            rows: vec![vec![make_cell("foo"), make_cell("42")]],
+        }];
+        let doc = flatten(&blocks, 80);
+        // Header + separator + 1 data row = 3 lines.
+        assert_eq!(doc.total_height, 3);
+        for line in &doc.lines {
+            assert!(matches!(line, DocumentLine::Text(_)), "table lines should be Text");
+        }
+    }
+
+    #[test]
+    fn test_layout_table_separator_contains_dashes() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Col")],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![make_cell("val")]],
+        }];
+        let doc = flatten(&blocks, 80);
+        // Second line is the separator.
+        if let DocumentLine::Text(sep_line) = &doc.lines[1] {
+            let text: String = sep_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains('─'), "separator should contain ─, got: {text}");
+        } else {
+            panic!("expected Text separator line");
+        }
+    }
+
+    #[test]
+    fn test_layout_table_no_panic_when_too_wide() {
+        // Many wide columns that exceed terminal width — must not panic.
+        let headers: Vec<Vec<StyledSpan>> = (0..20).map(|i| make_cell(&format!("Header{i}"))).collect();
+        let alignments = vec![pulldown_cmark::Alignment::None; 20];
+        let rows = vec![(0..20).map(|i| make_cell(&format!("cell{i}"))).collect()];
+        let blocks = vec![RenderedBlock::Table { headers, alignments, rows }];
+        let doc = flatten(&blocks, 40);
+        assert!(doc.total_height >= 3, "should still produce header/sep/row lines");
+    }
+
+    #[test]
+    fn test_layout_table_alignment_right() {
+        use pulldown_cmark::Alignment;
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("X")],
+            alignments: vec![Alignment::Right],
+            rows: vec![vec![make_cell("hi")]],
+        }];
+        let doc = flatten(&blocks, 40);
+        // Just verify it doesn't panic and produces 3 lines.
+        assert_eq!(doc.total_height, 3);
+    }

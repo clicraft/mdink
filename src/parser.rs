@@ -4,7 +4,9 @@
 //! a markdown source string and produces a `Vec<RenderedBlock>` — the
 //! intermediate representation consumed by the layout engine.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 
@@ -12,7 +14,7 @@ use ratatui::text::Line;
 ///
 /// Each variant corresponds to a markdown block-level element.
 /// Inline styling is carried via `Vec<StyledSpan>` in content fields.
-// IR variants and fields are forward-declared for later phases; allow unused.
+// `level` and `Spacer` are forward-declared for Phase 5 theming; allow until then.
 #[allow(dead_code)]
 pub enum RenderedBlock {
     /// Heading with level (1–6). Content carries inline styles.
@@ -30,6 +32,36 @@ pub enum RenderedBlock {
     ThematicBreak,
     /// Vertical spacing between blocks.
     Spacer { lines: u16 },
+    /// An ordered or unordered list.
+    List {
+        /// `true` for ordered lists, `false` for bullet lists.
+        ordered: bool,
+        /// Starting number for ordered lists (usually 1).
+        start: u64,
+        /// The list items in order.
+        items: Vec<ListItem>,
+    },
+    /// A block quote containing nested blocks.
+    BlockQuote { children: Vec<RenderedBlock> },
+    /// A GFM table with headers, column alignments, and body rows.
+    Table {
+        /// Header cells (one `Vec<StyledSpan>` per column).
+        headers: Vec<Vec<StyledSpan>>,
+        /// Per-column alignment from the separator row.
+        alignments: Vec<Alignment>,
+        /// Body rows (one `Vec<Vec<StyledSpan>>` per row, inner vec = columns).
+        rows: Vec<Vec<Vec<StyledSpan>>>,
+    },
+}
+
+/// A single item in an ordered or unordered list.
+pub struct ListItem {
+    /// Inline content for the first paragraph of this item.
+    pub content: Vec<StyledSpan>,
+    /// Nested blocks (sub-lists, code blocks, etc.).
+    pub children: Vec<RenderedBlock>,
+    /// Task list state: `None` = not a task, `Some(true)` = checked, `Some(false)` = unchecked.
+    pub task: Option<bool>,
 }
 
 /// A text span with associated style information.
@@ -54,11 +86,28 @@ enum ParserState {
     InHeading { level: u8 },
     /// Inside a paragraph block.
     InParagraph,
+    /// Inside a paragraph that is itself inside a list item.
+    /// Text accumulates into `current_spans` without emitting a Paragraph block.
+    InListItemParagraph,
     /// Inside a fenced or indented code block; accumulating text.
     InCodeBlock { language: String, buffer: String },
     /// Inside an unrecognized block that we skip in this phase.
     /// We count nesting depth so we know when the matching End arrives.
     Skipping { depth: u32 },
+    /// Inside a list; accumulating `ListItem`s.
+    InList { ordered: bool, start: u64, items: Vec<ListItem> },
+    /// Inside a single list item; accumulating content and child blocks.
+    InListItem { children: Vec<RenderedBlock>, task: Option<bool> },
+    /// Inside a block quote; accumulating child blocks.
+    InBlockQuote { children: Vec<RenderedBlock> },
+    /// Inside a GFM table; accumulating header/body cells row by row.
+    InTable {
+        headers: Vec<Vec<StyledSpan>>,
+        alignments: Vec<Alignment>,
+        rows: Vec<Vec<Vec<StyledSpan>>>,
+        current_row: Vec<Vec<StyledSpan>>,
+        in_head: bool,
+    },
 }
 
 /// Returns the default heading style for a given level (1–6).
@@ -123,7 +172,7 @@ struct ParseContext<'a> {
     state_stack: Vec<ParserState>,
     /// Inline formatting modifier stack (push on Start, pop on End).
     style_stack: Vec<Style>,
-    /// Spans accumulated for the block currently being built.
+    /// Spans accumulated for the block or cell currently being built.
     current_spans: Vec<StyledSpan>,
 }
 
@@ -164,6 +213,8 @@ impl<'a> ParseContext<'a> {
             self.on_code_block_event(event);
         } else if matches!(self.state_stack.last(), Some(ParserState::Skipping { .. })) {
             self.on_skipping_event(event);
+        } else if matches!(self.state_stack.last(), Some(ParserState::InTable { .. })) {
+            self.on_table_event(event);
         } else {
             self.dispatch(event);
         }
@@ -191,8 +242,7 @@ impl<'a> ParseContext<'a> {
                         &language,
                         "base16-ocean.dark",
                     );
-                    self.blocks
-                        .push(RenderedBlock::CodeBlock { language, highlighted_lines });
+                    self.emit_block(RenderedBlock::CodeBlock { language, highlighted_lines });
                 }
             }
             // Ignore all other events (syntax, meta) inside a code block.
@@ -226,13 +276,92 @@ impl<'a> ParseContext<'a> {
         }
     }
 
-    /// Dispatches normal (non-code-block, non-skipping) events.
+    /// Handles events when inside a GFM table.
+    ///
+    /// All inline content (text, code, emphasis) flows through `current_spans`.
+    /// Structural events (TableHead, TableRow, TableCell) manage the accumulator state.
+    fn on_table_event(&mut self, event: Event) {
+        match event {
+            Event::Start(Tag::TableHead) => {
+                if let Some(ParserState::InTable { in_head, .. }) = self.state_stack.last_mut() {
+                    *in_head = true;
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(ParserState::InTable { in_head, .. }) = self.state_stack.last_mut() {
+                    *in_head = false;
+                }
+            }
+            Event::Start(Tag::TableRow) => {}
+            Event::End(TagEnd::TableRow) => {
+                if let Some(ParserState::InTable { rows, current_row, in_head, .. }) =
+                    self.state_stack.last_mut()
+                {
+                    if !*in_head {
+                        let row = std::mem::take(current_row);
+                        if !row.is_empty() {
+                            rows.push(row);
+                        }
+                    }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                self.current_spans.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                let cell = std::mem::take(&mut self.current_spans);
+                if let Some(ParserState::InTable { headers, current_row, in_head, .. }) =
+                    self.state_stack.last_mut()
+                {
+                    if *in_head {
+                        headers.push(cell);
+                    } else {
+                        current_row.push(cell);
+                    }
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                match self.state_stack.pop() {
+                    Some(ParserState::InTable { headers, alignments, rows, .. }) => {
+                        self.emit_block(RenderedBlock::Table { headers, alignments, rows });
+                    }
+                    other => {
+                        debug_assert!(false, "End(Table) without InTable state: {other:?}");
+                    }
+                }
+            }
+            // Inline content inside table cells
+            Event::Text(text) => self.push_text(&text),
+            Event::Code(text) => self.push_inline_code(&text),
+            Event::SoftBreak | Event::HardBreak => {}
+            Event::Start(Tag::Emphasis) => {
+                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+            }
+            Event::Start(Tag::Strong) => {
+                self.push_style(Style::default().add_modifier(Modifier::BOLD));
+            }
+            Event::End(TagEnd::Emphasis | TagEnd::Strong) => self.pop_style(),
+            Event::Start(Tag::Link { .. }) => {
+                self.push_style(Style::default().add_modifier(Modifier::ITALIC));
+            }
+            Event::End(TagEnd::Link) => self.pop_style(),
+            _ => {}
+        }
+    }
+
+    /// Dispatches normal (non-code-block, non-skipping, non-table) events.
     fn dispatch(&mut self, event: Event) {
         match event {
             // ── Block-level start ────────────────────────────────────
             Event::Start(Tag::Heading { level, .. }) => self.start_heading(level),
             Event::Start(Tag::Paragraph) => self.start_paragraph(),
             Event::Start(Tag::CodeBlock(kind)) => self.start_code_block(kind),
+
+            // ── Phase 3: Structured blocks ───────────────────────────
+            Event::Start(Tag::List(first_number)) => self.start_list(first_number),
+            Event::Start(Tag::Item) => self.start_list_item(),
+            Event::Start(Tag::BlockQuote(_)) => self.start_block_quote(),
+            Event::Start(Tag::Table(alignments)) => self.start_table(alignments),
 
             // ── Inline passthrough ───────────────────────────────────
             // Links: render text in the italic font slot; URL is ignored.
@@ -260,6 +389,9 @@ impl<'a> ParseContext<'a> {
             // ── Block-level end ──────────────────────────────────────
             Event::End(TagEnd::Heading(_)) => self.end_heading(),
             Event::End(TagEnd::Paragraph) => self.end_paragraph(),
+            Event::End(TagEnd::List(_)) => self.end_list(),
+            Event::End(TagEnd::Item) => self.end_list_item(),
+            Event::End(TagEnd::BlockQuote(_)) => self.end_block_quote(),
 
             // ── Inline end ───────────────────────────────────────────
             Event::End(TagEnd::Link) => self.pop_style(),
@@ -273,18 +405,44 @@ impl<'a> ParseContext<'a> {
             Event::Code(text) => self.push_inline_code(&text),
             Event::SoftBreak => self.push_soft_break(),
             Event::HardBreak => self.push_hard_break(),
-            Event::Rule => self.blocks.push(RenderedBlock::ThematicBreak),
+            Event::Rule => self.emit_block(RenderedBlock::ThematicBreak),
+            Event::TaskListMarker(checked) => self.handle_task_list_marker(checked),
 
             // ── Ignored ──────────────────────────────────────────────
             // End events for passthrough/skipped tags have no handler.
             Event::End(_) => {}
-            Event::TaskListMarker(_)
-            | Event::FootnoteReference(_)
+            Event::FootnoteReference(_)
             | Event::InlineHtml(_)
             | Event::InlineMath(_)
             | Event::DisplayMath(_)
             | Event::Html(_) => {}
         }
+    }
+
+    // ── Block emission ───────────────────────────────────────────────────────
+
+    /// Routes a completed block to the correct collector.
+    ///
+    /// Walks the state stack from the top to find the nearest open container
+    /// (`InListItem` or `InBlockQuote`). If found, the block is pushed to that
+    /// container's `children` vec. Otherwise it is appended to the top-level
+    /// `blocks` vec. This makes every handler automatically work inside nested
+    /// lists and block quotes without special-casing.
+    fn emit_block(&mut self, block: RenderedBlock) {
+        for state in self.state_stack.iter_mut().rev() {
+            match state {
+                ParserState::InListItem { children, .. } => {
+                    children.push(block);
+                    return;
+                }
+                ParserState::InBlockQuote { children } => {
+                    children.push(block);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.blocks.push(block);
     }
 
     // ── Block handlers ───────────────────────────────────────────────────────
@@ -313,18 +471,43 @@ impl<'a> ParseContext<'a> {
             }
         };
         let content = std::mem::take(&mut self.current_spans);
-        self.blocks.push(RenderedBlock::Heading { level, content });
+        self.emit_block(RenderedBlock::Heading { level, content });
     }
 
     fn start_paragraph(&mut self) {
-        self.current_spans.clear();
-        self.state_stack.push(ParserState::InParagraph);
+        // Inside a list item, paragraph text flows into the item's content
+        // rather than becoming a child Paragraph block.
+        if matches!(self.state_stack.last(), Some(ParserState::InListItem { .. })) {
+            self.state_stack.push(ParserState::InListItemParagraph);
+        } else {
+            self.current_spans.clear();
+            self.state_stack.push(ParserState::InParagraph);
+        }
     }
 
     fn end_paragraph(&mut self) {
-        self.state_stack.pop();
-        let content = std::mem::take(&mut self.current_spans);
-        self.blocks.push(RenderedBlock::Paragraph { content });
+        match self.state_stack.pop() {
+            Some(ParserState::InParagraph) => {
+                let content = std::mem::take(&mut self.current_spans);
+                self.emit_block(RenderedBlock::Paragraph { content });
+            }
+            Some(ParserState::InListItemParagraph) => {
+                // Content stays in current_spans for the enclosing list item.
+                // Add a space separator in case another paragraph follows.
+                if !self.current_spans.is_empty() {
+                    self.current_spans.push(StyledSpan {
+                        text: " ".to_string(),
+                        style: Style::default(),
+                    });
+                }
+            }
+            other => {
+                debug_assert!(
+                    false,
+                    "End(Paragraph) in unexpected state: {other:?}"
+                );
+            }
+        }
     }
 
     fn start_code_block(&mut self, kind: CodeBlockKind) {
@@ -344,6 +527,91 @@ impl<'a> ParseContext<'a> {
         };
         self.state_stack
             .push(ParserState::InCodeBlock { language, buffer: String::new() });
+    }
+
+    // ── Phase 3: List handlers ───────────────────────────────────────────────
+
+    fn start_list(&mut self, first_number: Option<u64>) {
+        let ordered = first_number.is_some();
+        let start = first_number.unwrap_or(1);
+        self.state_stack.push(ParserState::InList { ordered, start, items: Vec::new() });
+    }
+
+    fn end_list(&mut self) {
+        match self.state_stack.pop() {
+            Some(ParserState::InList { ordered, start, items }) => {
+                self.emit_block(RenderedBlock::List { ordered, start, items });
+            }
+            other => {
+                debug_assert!(false, "End(List) without InList state: {other:?}");
+            }
+        }
+    }
+
+    fn start_list_item(&mut self) {
+        self.current_spans.clear();
+        self.state_stack
+            .push(ParserState::InListItem { children: Vec::new(), task: None });
+    }
+
+    fn end_list_item(&mut self) {
+        // Trim the trailing separator space added by end_paragraph for
+        // InListItemParagraph — it's only needed between consecutive paragraphs.
+        if self.current_spans.last().is_some_and(|s| s.text == " ") {
+            self.current_spans.pop();
+        }
+        let content = std::mem::take(&mut self.current_spans);
+        match self.state_stack.pop() {
+            Some(ParserState::InListItem { children, task }) => {
+                let item = ListItem { content, children, task };
+                match self.state_stack.last_mut() {
+                    Some(ParserState::InList { items, .. }) => {
+                        items.push(item);
+                    }
+                    other => {
+                        debug_assert!(false, "End(Item) parent is not InList: {other:?}");
+                    }
+                }
+            }
+            other => {
+                debug_assert!(false, "End(Item) without InListItem state: {other:?}");
+            }
+        }
+    }
+
+    fn handle_task_list_marker(&mut self, checked: bool) {
+        if let Some(ParserState::InListItem { task, .. }) = self.state_stack.last_mut() {
+            *task = Some(checked);
+        }
+    }
+
+    // ── Phase 3: Block quote handlers ───────────────────────────────────────
+
+    fn start_block_quote(&mut self) {
+        self.state_stack.push(ParserState::InBlockQuote { children: Vec::new() });
+    }
+
+    fn end_block_quote(&mut self) {
+        match self.state_stack.pop() {
+            Some(ParserState::InBlockQuote { children }) => {
+                self.emit_block(RenderedBlock::BlockQuote { children });
+            }
+            other => {
+                debug_assert!(false, "End(BlockQuote) without InBlockQuote state: {other:?}");
+            }
+        }
+    }
+
+    // ── Phase 3: Table handlers ──────────────────────────────────────────────
+
+    fn start_table(&mut self, alignments: Vec<Alignment>) {
+        self.state_stack.push(ParserState::InTable {
+            headers: Vec::new(),
+            alignments,
+            rows: Vec::new(),
+            current_row: Vec::new(),
+            in_head: false,
+        });
     }
 
     // ── Style stack helpers ──────────────────────────────────────────────────
@@ -398,10 +666,15 @@ impl std::fmt::Debug for ParserState {
             ParserState::TopLevel => write!(f, "TopLevel"),
             ParserState::InHeading { level } => write!(f, "InHeading({level})"),
             ParserState::InParagraph => write!(f, "InParagraph"),
+            ParserState::InListItemParagraph => write!(f, "InListItemParagraph"),
             ParserState::InCodeBlock { language, .. } => {
                 write!(f, "InCodeBlock({language})")
             }
             ParserState::Skipping { depth } => write!(f, "Skipping({depth})"),
+            ParserState::InList { ordered, .. } => write!(f, "InList(ordered={ordered})"),
+            ParserState::InListItem { .. } => write!(f, "InListItem"),
+            ParserState::InBlockQuote { .. } => write!(f, "InBlockQuote"),
+            ParserState::InTable { .. } => write!(f, "InTable"),
         }
     }
 }

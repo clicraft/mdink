@@ -433,6 +433,241 @@
         assert!(has_rule, "should have thematic breaks");
     }
 
+    // ── Phase 3: List tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parser_unordered_list_produces_list_block() {
+        let blocks = parse("- alpha\n- beta\n- gamma", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::List { ordered, start, items } => {
+                assert!(!ordered, "expected unordered");
+                assert_eq!(*start, 1);
+                assert_eq!(items.len(), 3);
+                let text: String = items[0].content.iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(text, "alpha");
+            }
+            _ => panic!("expected List block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_ordered_list_preserves_start() {
+        let blocks = parse("5. first\n6. second", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::List { ordered, start, items } => {
+                assert!(ordered, "expected ordered");
+                assert_eq!(*start, 5);
+                assert_eq!(items.len(), 2);
+            }
+            _ => panic!("expected List block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_nested_list_children_populated() {
+        let md = "- outer\n  - inner";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::List { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert!(
+                    !items[0].children.is_empty(),
+                    "outer item should have nested list as child"
+                );
+                match &items[0].children[0] {
+                    RenderedBlock::List { ordered, items: inner, .. } => {
+                        assert!(!ordered);
+                        assert_eq!(inner.len(), 1);
+                        let text: String =
+                            inner[0].content.iter().map(|s| s.text.as_str()).collect();
+                        assert_eq!(text, "inner");
+                    }
+                    _ => panic!("expected inner List"),
+                }
+            }
+            _ => panic!("expected outer List"),
+        }
+    }
+
+    #[test]
+    fn test_parser_task_list_checked_and_unchecked() {
+        let md = "- [x] done\n- [ ] pending";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::List { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].task, Some(true), "first item should be checked");
+                assert_eq!(items[1].task, Some(false), "second item should be unchecked");
+            }
+            _ => panic!("expected List block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_list_items_preserve_text() {
+        let blocks = parse("- hello world\n- foo bar", h());
+        match &blocks[0] {
+            RenderedBlock::List { items, .. } => {
+                let t0: String = items[0].content.iter().map(|s| s.text.as_str()).collect();
+                let t1: String = items[1].content.iter().map(|s| s.text.as_str()).collect();
+                assert!(t0.contains("hello"));
+                assert!(t1.contains("foo"));
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn test_parser_list_followed_by_paragraph() {
+        let md = "- item\n\nAfter";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], RenderedBlock::List { .. }));
+        assert!(matches!(&blocks[1], RenderedBlock::Paragraph { .. }));
+    }
+
+    // ── Phase 3: Block quote tests ───────────────────────────────
+
+    #[test]
+    fn test_parser_block_quote_has_children() {
+        let blocks = parse("> Quoted text here", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::BlockQuote { children } => {
+                assert!(!children.is_empty(), "block quote should have child blocks");
+                assert!(
+                    children.iter().any(|b| matches!(b, RenderedBlock::Paragraph { .. })),
+                    "block quote child should be a paragraph"
+                );
+            }
+            _ => panic!("expected BlockQuote"),
+        }
+    }
+
+    #[test]
+    fn test_parser_block_quote_text_preserved() {
+        let blocks = parse("> Hello from the quote", h());
+        match &blocks[0] {
+            RenderedBlock::BlockQuote { children } => {
+                if let RenderedBlock::Paragraph { content } = &children[0] {
+                    let text: String = content.iter().map(|s| s.text.as_str()).collect();
+                    assert!(text.contains("Hello from the quote"));
+                } else {
+                    panic!("expected Paragraph inside BlockQuote");
+                }
+            }
+            _ => panic!("expected BlockQuote"),
+        }
+    }
+
+    #[test]
+    fn test_parser_nested_block_quote() {
+        let md = "> outer\n>\n> > inner";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::BlockQuote { children } => {
+                assert!(
+                    children.iter().any(|b| matches!(b, RenderedBlock::BlockQuote { .. })),
+                    "outer quote should contain inner quote"
+                );
+            }
+            _ => panic!("expected BlockQuote"),
+        }
+    }
+
+    #[test]
+    fn test_parser_block_quote_with_heading() {
+        let blocks = parse("> # Heading inside quote", h());
+        match &blocks[0] {
+            RenderedBlock::BlockQuote { children } => {
+                assert!(
+                    children.iter().any(|b| matches!(b, RenderedBlock::Heading { .. })),
+                    "block quote should contain the heading"
+                );
+            }
+            _ => panic!("expected BlockQuote"),
+        }
+    }
+
+    // ── Phase 3: Table tests ─────────────────────────────────────
+
+    #[test]
+    fn test_parser_table_headers_and_rows() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Table { headers, rows, .. } => {
+                assert_eq!(headers.len(), 2, "two header columns");
+                let h0: String = headers[0].iter().map(|s| s.text.as_str()).collect();
+                let h1: String = headers[1].iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(h0.trim(), "A");
+                assert_eq!(h1.trim(), "B");
+                assert_eq!(rows.len(), 1, "one body row");
+                assert_eq!(rows[0].len(), 2, "row has two cells");
+            }
+            _ => panic!("expected Table block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_table_alignments_count_matches_headers() {
+        let md = "| L | C | R |\n|:---|:---:|---:|\n| a | b | c |";
+        let blocks = parse(md, h());
+        match &blocks[0] {
+            RenderedBlock::Table { headers, alignments, rows } => {
+                assert_eq!(headers.len(), 3);
+                assert_eq!(alignments.len(), 3);
+                assert_eq!(rows.len(), 1);
+            }
+            _ => panic!("expected Table block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_table_body_cell_text_preserved() {
+        let md = "| Name | Value |\n|------|-------|\n| foo  | 42    |";
+        let blocks = parse(md, h());
+        match &blocks[0] {
+            RenderedBlock::Table { rows, .. } => {
+                let cell0: String = rows[0][0].iter().map(|s| s.text.as_str()).collect();
+                let cell1: String = rows[0][1].iter().map(|s| s.text.as_str()).collect();
+                assert!(cell0.contains("foo"), "cell 0 should contain 'foo'");
+                assert!(cell1.contains("42"), "cell 1 should contain '42'");
+            }
+            _ => panic!("expected Table block"),
+        }
+    }
+
+    // ── Phase 3: Test data integration ──────────────────────────
+
+    #[test]
+    fn test_lists_testdata_parses_without_panic() {
+        let source = include_str!("../testdata/lists.md");
+        let blocks = parse(source, h());
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::List { .. })), "should have List blocks");
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Heading { .. })), "should have headings");
+    }
+
+    #[test]
+    fn test_blockquotes_testdata_parses_without_panic() {
+        let source = include_str!("../testdata/blockquotes.md");
+        let blocks = parse(source, h());
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::BlockQuote { .. })), "should have BlockQuote blocks");
+    }
+
+    #[test]
+    fn test_tables_testdata_parses_without_panic() {
+        let source = include_str!("../testdata/tables.md");
+        let blocks = parse(source, h());
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Table { .. })), "should have Table blocks");
+    }
+
     // ── Security regression tests ────────────────────────────────
 
     #[test]

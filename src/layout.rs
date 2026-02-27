@@ -4,10 +4,12 @@
 //! the block-level IR from the parser and produces a flat sequence of
 //! `DocumentLine`s sized to fit a given terminal width.
 
+use pulldown_cmark::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
-use crate::parser::{RenderedBlock, StyledSpan};
+use crate::parser::{ListItem, RenderedBlock, StyledSpan};
 
 /// A pre-rendered document ready for viewport slicing and rendering.
 ///
@@ -24,7 +26,7 @@ pub struct PreRenderedDocument {
 ///
 /// The renderer matches on this enum exhaustively to produce frame output.
 pub enum DocumentLine {
-    /// A line of styled text (paragraph, heading, etc.).
+    /// A line of styled text (paragraph, heading, list item, etc.).
     Text(Line<'static>),
     /// A line of syntax-highlighted code (no wrapping).
     Code(Line<'static>),
@@ -49,65 +51,322 @@ pub fn flatten(blocks: &[RenderedBlock], width: u16) -> PreRenderedDocument {
         if i > 0 {
             lines.push(DocumentLine::Empty);
         }
+        lines.extend(flatten_single_block(block, width, 0));
+    }
 
-        match block {
-            RenderedBlock::Heading { content, .. } => {
-                let wrapped = wrap_styled_spans(content, width);
-                if wrapped.is_empty() {
-                    lines.push(DocumentLine::Empty);
-                } else {
-                    for line in wrapped {
-                        lines.push(DocumentLine::Text(line));
+    let total_height = lines.len();
+    PreRenderedDocument { lines, total_height }
+}
+
+/// Flattens a single `RenderedBlock` into a `Vec<DocumentLine>`.
+///
+/// `list_depth` is the current nesting depth of the enclosing list (0 = top-level).
+/// Used by `flatten_list` when recursively flattening child blocks.
+fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) -> Vec<DocumentLine> {
+    match block {
+        RenderedBlock::Heading { content, .. } => {
+            let wrapped = wrap_styled_spans(content, width);
+            if wrapped.is_empty() {
+                vec![DocumentLine::Empty]
+            } else {
+                wrapped.into_iter().map(DocumentLine::Text).collect()
+            }
+        }
+        RenderedBlock::Paragraph { content } => {
+            let wrapped = wrap_styled_spans(content, width);
+            if wrapped.is_empty() {
+                vec![DocumentLine::Empty]
+            } else {
+                wrapped.into_iter().map(DocumentLine::Text).collect()
+            }
+        }
+        RenderedBlock::CodeBlock { language, highlighted_lines } => {
+            let mut result = Vec::new();
+            // Emit language label header if language is specified.
+            if !language.is_empty() {
+                let label = Span::styled(
+                    format!(" {language} "),
+                    Style::default()
+                        .fg(Color::Indexed(245))
+                        .bg(Color::Indexed(235))
+                        .add_modifier(Modifier::ITALIC),
+                );
+                result.push(DocumentLine::Code(Line::from(label)));
+            }
+            // Emit each highlighted line (no wrapping — code is literal).
+            for line in highlighted_lines {
+                result.push(DocumentLine::Code(line.clone()));
+            }
+            result
+        }
+        RenderedBlock::ThematicBreak => vec![DocumentLine::Rule],
+        RenderedBlock::Spacer { lines: count } => {
+            (0..*count).map(|_| DocumentLine::Empty).collect()
+        }
+        RenderedBlock::List { ordered, start, items } => {
+            flatten_list(items, *ordered, *start, width, list_depth)
+        }
+        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width),
+        RenderedBlock::Table { headers, alignments, rows } => {
+            flatten_table(headers, alignments, rows, width)
+        }
+    }
+}
+
+// ── List layout ──────────────────────────────────────────────────────────────
+
+/// Flattens a list into `DocumentLine`s with bullet/number prefixes and indentation.
+///
+/// Bullet characters by depth: `•` (0), `◦` (1), `▪` (2+).
+/// Ordered lists use `n.` where `n = start + index`.
+/// Task items use `☑` (checked) or `☐` (unchecked).
+fn flatten_list(
+    items: &[ListItem],
+    ordered: bool,
+    start: u64,
+    width: usize,
+    depth: usize,
+) -> Vec<DocumentLine> {
+    let indent = "  ".repeat(depth);
+    let mut lines = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let prefix_str = if let Some(checked) = item.task {
+            if checked { "☑".to_string() } else { "☐".to_string() }
+        } else if ordered {
+            format!("{}.", start + i as u64)
+        } else {
+            match depth {
+                0 => "•",
+                1 => "◦",
+                _ => "▪",
+            }
+            .to_string()
+        };
+
+        // First-line prefix: "{indent}{prefix} "
+        let first_prefix = format!("{indent}{prefix_str} ");
+        let first_prefix_width = first_prefix.width();
+        // Continuation lines align with the start of the first line's content.
+        let cont_prefix = " ".repeat(first_prefix_width);
+
+        let content_width = width.saturating_sub(first_prefix_width).max(1);
+        let wrapped = wrap_styled_spans(&item.content, content_width);
+
+        if wrapped.is_empty() {
+            // Empty item — emit just the prefix.
+            lines.push(DocumentLine::Text(Line::from(Span::raw(first_prefix))));
+        } else {
+            for (j, content_line) in wrapped.into_iter().enumerate() {
+                let pref = if j == 0 { first_prefix.clone() } else { cont_prefix.clone() };
+                let mut spans = vec![Span::raw(pref)];
+                spans.extend(content_line.spans);
+                lines.push(DocumentLine::Text(Line::from(spans)));
+            }
+        }
+
+        // Flatten child blocks (nested lists, code blocks, etc.) at the next depth.
+        for child in &item.children {
+            let child_lines = flatten_single_block(child, width, depth + 1);
+            lines.extend(child_lines);
+        }
+    }
+
+    lines
+}
+
+// ── Block quote layout ───────────────────────────────────────────────────────
+
+/// Flattens a block quote into `DocumentLine`s prefixed with `│ `.
+///
+/// Every output line from each child block gets a `│ ` prefix applied.
+/// Nested block quotes recursively add another `│ ` level.
+/// The dim+italic modifier is merged into all text spans.
+fn flatten_block_quote(children: &[RenderedBlock], width: usize) -> Vec<DocumentLine> {
+    const PREFIX: &str = "│ ";
+    const PREFIX_WIDTH: usize = 2; // "│ " is 2 display columns
+    let inner_width = width.saturating_sub(PREFIX_WIDTH).max(1);
+    let quote_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
+
+    let mut result = Vec::new();
+
+    for (i, child) in children.iter().enumerate() {
+        // Visual spacing between child blocks inside the quote.
+        if i > 0 {
+            result.push(DocumentLine::Text(Line::from(Span::styled(
+                PREFIX.to_string(),
+                quote_style,
+            ))));
+        }
+        let child_lines = flatten_single_block(child, inner_width, 0);
+        for line in child_lines {
+            match line {
+                DocumentLine::Text(l) => {
+                    let mut spans = vec![Span::styled(PREFIX.to_string(), quote_style)];
+                    for span in l.spans {
+                        spans.push(Span {
+                            content: span.content,
+                            style: span.style.add_modifier(Modifier::DIM | Modifier::ITALIC),
+                        });
                     }
+                    result.push(DocumentLine::Text(Line::from(spans)));
                 }
-            }
-            RenderedBlock::Paragraph { content } => {
-                let wrapped = wrap_styled_spans(content, width);
-                if wrapped.is_empty() {
-                    lines.push(DocumentLine::Empty);
-                } else {
-                    for line in wrapped {
-                        lines.push(DocumentLine::Text(line));
-                    }
+                DocumentLine::Empty => {
+                    result.push(DocumentLine::Text(Line::from(Span::styled(
+                        PREFIX.to_string(),
+                        quote_style,
+                    ))));
                 }
-            }
-            RenderedBlock::CodeBlock {
-                language,
-                highlighted_lines,
-            } => {
-                // Emit language label header if language is specified.
-                if !language.is_empty() {
-                    let label = Span::styled(
-                        format!(" {language} "),
-                        Style::default()
-                            .fg(Color::Indexed(245))
-                            .bg(Color::Indexed(235))
-                            .add_modifier(Modifier::ITALIC),
-                    );
-                    lines.push(DocumentLine::Code(Line::from(label)));
+                DocumentLine::Code(l) => {
+                    // Code inside a block quote: add prefix but keep code formatting.
+                    let mut spans = vec![Span::styled(PREFIX.to_string(), quote_style)];
+                    spans.extend(l.spans);
+                    result.push(DocumentLine::Code(Line::from(spans)));
                 }
-                // Emit each highlighted line (no wrapping — code is literal).
-                for line in highlighted_lines {
-                    lines.push(DocumentLine::Code(line.clone()));
-                }
-            }
-            RenderedBlock::ThematicBreak => {
-                lines.push(DocumentLine::Rule);
-            }
-            RenderedBlock::Spacer { lines: count } => {
-                for _ in 0..*count {
-                    lines.push(DocumentLine::Empty);
+                DocumentLine::Rule => {
+                    result.push(DocumentLine::Text(Line::from(vec![
+                        Span::styled(PREFIX.to_string(), quote_style),
+                        Span::styled("─".repeat(inner_width), quote_style),
+                    ])));
                 }
             }
         }
     }
 
-    let total_height = lines.len();
-    PreRenderedDocument {
-        lines,
-        total_height,
+    result
+}
+
+// ── Table layout ─────────────────────────────────────────────────────────────
+
+/// Flattens a GFM table into `DocumentLine`s: header row, separator, body rows.
+///
+/// Column widths are auto-calculated from the widest content in each column.
+/// If the total table width exceeds the terminal width, each column is capped
+/// proportionally to fit — the table is truncated, not panicking.
+fn flatten_table(
+    headers: &[Vec<StyledSpan>],
+    alignments: &[Alignment],
+    rows: &[Vec<Vec<StyledSpan>>],
+    width: usize,
+) -> Vec<DocumentLine> {
+    let ncols = headers.len();
+    if ncols == 0 {
+        return Vec::new();
+    }
+
+    // Calculate column widths: max of header and all body cells in that column.
+    let mut col_widths: Vec<usize> = headers
+        .iter()
+        .map(|cell| cell.iter().map(|s| s.text.chars().count()).sum::<usize>().max(3))
+        .collect();
+
+    for row in rows {
+        for (col, cell) in row.iter().enumerate() {
+            if col < col_widths.len() {
+                let w: usize = cell.iter().map(|s| s.text.chars().count()).sum();
+                col_widths[col] = col_widths[col].max(w);
+            }
+        }
+    }
+
+    // Total display width: column widths + " │ " separators between columns.
+    let sep_overhead = if ncols > 1 { (ncols - 1) * 3 } else { 0 };
+    let total = col_widths.iter().sum::<usize>() + sep_overhead;
+    if total > width {
+        // Cap each column equally to fit within available width.
+        let max_col = (width.saturating_sub(sep_overhead) / ncols).max(3);
+        for w in &mut col_widths {
+            *w = (*w).min(max_col);
+        }
+    }
+
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().add_modifier(Modifier::DIM);
+
+    let mut result = Vec::new();
+    result.push(DocumentLine::Text(Line::from(build_table_row(
+        headers,
+        &col_widths,
+        alignments,
+        Some(header_style),
+    ))));
+    result.push(DocumentLine::Text(Line::from(build_table_separator(
+        &col_widths,
+        sep_style,
+    ))));
+    for row in rows {
+        result.push(DocumentLine::Text(Line::from(build_table_row(
+            row,
+            &col_widths,
+            alignments,
+            None,
+        ))));
+    }
+    result
+}
+
+/// Builds one row of a table as a flat `Vec<Span>`.
+fn build_table_row(
+    cells: &[Vec<StyledSpan>],
+    col_widths: &[usize],
+    alignments: &[Alignment],
+    extra_style: Option<Style>,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+
+    for (col, &col_w) in col_widths.iter().enumerate() {
+        if col > 0 {
+            spans.push(Span::raw(" │ ".to_string()));
+        }
+        let cell = cells.get(col).map(Vec::as_slice).unwrap_or(&[]);
+        let plain: String = cell.iter().map(|s| s.text.as_str()).collect();
+        let align = alignments.get(col).copied().unwrap_or(Alignment::None);
+        let padded = align_cell(&plain, col_w, align);
+
+        let span = if let Some(style) = extra_style {
+            Span::styled(padded, style)
+        } else {
+            Span::raw(padded)
+        };
+        spans.push(span);
+    }
+
+    spans
+}
+
+/// Builds the separator row (`───┼───`) for a table.
+fn build_table_separator(col_widths: &[usize], style: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, &w) in col_widths.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("─┼─".to_string(), style));
+        }
+        spans.push(Span::styled("─".repeat(w), style));
+    }
+    spans
+}
+
+/// Pads or truncates `text` to exactly `width` display columns with given alignment.
+fn align_cell(text: &str, width: usize, alignment: Alignment) -> String {
+    let char_count = text.chars().count();
+    if char_count >= width {
+        // Truncate to fit — prevents overflow into adjacent columns.
+        text.chars().take(width).collect()
+    } else {
+        let padding = width - char_count;
+        match alignment {
+            Alignment::Right => format!("{:>width$}", text, width = width),
+            Alignment::Center => {
+                let left = padding / 2;
+                let right = padding - left;
+                format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+            }
+            _ => format!("{:<width$}", text, width = width),
+        }
     }
 }
+
+// ── Text wrapping ─────────────────────────────────────────────────────────────
 
 /// Wraps styled spans to fit within a given width, preserving styles.
 ///
