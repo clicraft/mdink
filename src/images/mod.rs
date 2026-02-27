@@ -109,5 +109,4 @@ impl ImageManager {
 }
 
 #[cfg(test)]
-#[path = "images_tests.rs"]
 mod tests;

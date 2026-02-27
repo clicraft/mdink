@@ -469,7 +469,7 @@
 
     #[test]
     fn test_font_slots_file_parses_without_panic() {
-        let source = include_str!("../testdata/font-slots.md");
+        let source = include_str!("../../testdata/font-slots.md");
         let blocks = parse(source, h());
         assert!(blocks.len() > 20, "font-slots.md should produce many blocks");
         // Verify it contains all expected block types.
@@ -698,7 +698,7 @@
 
     #[test]
     fn test_lists_testdata_parses_without_panic() {
-        let source = include_str!("../testdata/lists.md");
+        let source = include_str!("../../testdata/lists.md");
         let blocks = parse(source, h());
         assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::List { .. })), "should have List blocks");
         assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Heading { .. })), "should have headings");
@@ -706,14 +706,14 @@
 
     #[test]
     fn test_blockquotes_testdata_parses_without_panic() {
-        let source = include_str!("../testdata/blockquotes.md");
+        let source = include_str!("../../testdata/blockquotes.md");
         let blocks = parse(source, h());
         assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::BlockQuote { .. })), "should have BlockQuote blocks");
     }
 
     #[test]
     fn test_tables_testdata_parses_without_panic() {
-        let source = include_str!("../testdata/tables.md");
+        let source = include_str!("../../testdata/tables.md");
         let blocks = parse(source, h());
         assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Table { .. })), "should have Table blocks");
     }
@@ -721,7 +721,7 @@
     #[test]
     fn test_stress_testdata_parses_without_panic() {
         // Full kitchen-sink document: exercises every parser path in one pass.
-        let source = include_str!("../testdata/stress-test.md");
+        let source = include_str!("../../testdata/stress-test.md");
         let blocks = parse(source, h());
 
         // Recursively collect all blocks so nested code blocks inside lists
@@ -767,7 +767,7 @@
     fn test_stress_testdata_layout_without_panic() {
         // Verify the layout engine handles the stress document at various widths.
         use crate::layout::flatten;
-        let source = include_str!("../testdata/stress-test.md");
+        let source = include_str!("../../testdata/stress-test.md");
         let blocks = parse(source, h());
         let theme = crate::theme::default_theme();
         for width in [20u16, 40, 80, 120, 220] {

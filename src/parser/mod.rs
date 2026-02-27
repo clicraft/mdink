@@ -771,5 +771,4 @@ impl std::fmt::Debug for ParserState {
 }
 
 #[cfg(test)]
-#[path = "parser_tests.rs"]
 mod tests;

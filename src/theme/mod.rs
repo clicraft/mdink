@@ -550,5 +550,4 @@ pub fn default_theme() -> MarkdownTheme {
 }
 
 #[cfg(test)]
-#[path = "theme_tests.rs"]
 mod tests;

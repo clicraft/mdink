@@ -646,5 +646,4 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
 }
 
 #[cfg(test)]
-#[path = "layout_tests.rs"]
 mod tests;

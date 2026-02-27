@@ -124,7 +124,7 @@ fn load_syntax_set() -> SyntaxSet {
 
     // PowerShell: not in syntect's defaults (Sublime's default packages omit it).
     const POWERSHELL_SYNTAX: &str =
-        include_str!("../assets/syntaxes/PowerShell.sublime-syntax");
+        include_str!("../../assets/syntaxes/PowerShell.sublime-syntax");
     if let Ok(def) = SyntaxDefinition::load_from_str(POWERSHELL_SYNTAX, true, None) {
         builder.add(def);
     }
@@ -187,5 +187,4 @@ fn syntect_style_to_span(text: &str, style: SyntectStyle, is_comment: bool) -> S
 }
 
 #[cfg(test)]
-#[path = "highlight_tests.rs"]
 mod tests;
