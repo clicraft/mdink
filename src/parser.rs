@@ -174,6 +174,12 @@ struct ParseContext<'a> {
     style_stack: Vec<Style>,
     /// Spans accumulated for the block or cell currently being built.
     current_spans: Vec<StyledSpan>,
+    /// Saved list-item spans while a nested paragraph (inside a block quote
+    /// that is itself inside a list item) temporarily uses `current_spans`.
+    /// Restored when that nested paragraph ends. Single-level stash is
+    /// sufficient because pulldown-cmark produces at most one such context
+    /// level per list item before the next End(Item) event arrives.
+    span_stash: Vec<StyledSpan>,
 }
 
 impl<'a> ParseContext<'a> {
@@ -184,6 +190,7 @@ impl<'a> ParseContext<'a> {
             state_stack: vec![ParserState::TopLevel],
             style_stack: Vec::new(),
             current_spans: Vec::new(),
+            span_stash: Vec::new(),
         }
     }
 
@@ -467,7 +474,11 @@ impl<'a> ParseContext<'a> {
                     false,
                     "End(Heading) without InHeading state: got {other:?}"
                 );
-                1
+                // Do NOT emit a corrupted Heading block — in release builds, clear
+                // current_spans to prevent their content from leaking into the next
+                // block, then return without emitting anything.
+                self.current_spans.clear();
+                return;
             }
         };
         let content = std::mem::take(&mut self.current_spans);
