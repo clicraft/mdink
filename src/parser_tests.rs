@@ -8,6 +8,17 @@
         &TEST_HIGHLIGHTER
     }
 
+    /// Wrapper so every test can call `parse(md, h())` without constructing an
+    /// ImageManager. Tests that need images should call `super::parse` directly.
+    fn parse(source: &str, highlighter: &crate::highlight::Highlighter) -> Vec<RenderedBlock> {
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("."),
+            None, // no Picker → all images degrade to ImageFallback
+            80,
+        );
+        super::parse(source, highlighter, &mut im)
+    }
+
     #[test]
     fn test_parser_heading_h1_produces_heading_block() {
         let blocks = parse("# Hello", h());
@@ -212,18 +223,21 @@
 
     #[test]
     fn test_parser_image_alt_text_preserved() {
+        // Phase 4: images become ImageFallback blocks (load fails in tests
+        // because no Picker is available and the path doesn't exist).
+        // The alt text must be preserved in the fallback block.
         let blocks = parse("![alt text](image.png)", h());
-        assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
+        // pulldown-cmark wraps a standalone image in a Paragraph; that becomes
+        // an empty Paragraph + an ImageFallback block (or just ImageFallback
+        // depending on the event sequence). Accept either form.
+        let has_alt = blocks.iter().any(|b| match b {
+            RenderedBlock::ImageFallback { alt_text } => alt_text.contains("alt text"),
             RenderedBlock::Paragraph { content } => {
-                let all_text: String = content.iter().map(|s| s.text.as_str()).collect();
-                assert!(
-                    all_text.contains("alt text"),
-                    "image alt text should be preserved, got: {all_text}"
-                );
+                content.iter().any(|s| s.text.contains("alt text"))
             }
-            _ => panic!("expected Paragraph block"),
-        }
+            _ => false,
+        });
+        assert!(has_alt, "alt text 'alt text' not found in any block; got {blocks_len} blocks", blocks_len = blocks.len());
     }
 
     #[test]
@@ -666,6 +680,66 @@
         let source = include_str!("../testdata/tables.md");
         let blocks = parse(source, h());
         assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Table { .. })), "should have Table blocks");
+    }
+
+    #[test]
+    fn test_stress_testdata_parses_without_panic() {
+        // Full kitchen-sink document: exercises every parser path in one pass.
+        let source = include_str!("../testdata/stress-test.md");
+        let blocks = parse(source, h());
+
+        // Recursively collect all blocks so nested code blocks inside lists
+        // and block quotes are visible to the assertions.
+        fn collect_all(blocks: &[RenderedBlock], out: &mut Vec<String>) {
+            for b in blocks {
+                out.push(match b {
+                    RenderedBlock::Heading { .. } => "Heading",
+                    RenderedBlock::Paragraph { .. } => "Paragraph",
+                    RenderedBlock::CodeBlock { .. } => "CodeBlock",
+                    RenderedBlock::List { .. } => "List",
+                    RenderedBlock::BlockQuote { .. } => "BlockQuote",
+                    RenderedBlock::Table { .. } => "Table",
+                    RenderedBlock::ThematicBreak => "ThematicBreak",
+                    RenderedBlock::Spacer { .. } => "Spacer",
+                    RenderedBlock::Image { .. } => "Image",
+                    RenderedBlock::ImageFallback { .. } => "ImageFallback",
+                }.to_string());
+                match b {
+                    RenderedBlock::List { items, .. } => {
+                        for item in items {
+                            collect_all(&item.children, out);
+                        }
+                    }
+                    RenderedBlock::BlockQuote { children } => collect_all(children, out),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut all_kinds = Vec::new();
+        collect_all(&blocks, &mut all_kinds);
+
+        for expected in ["Heading", "Paragraph", "CodeBlock", "List", "BlockQuote", "Table", "ThematicBreak"] {
+            assert!(
+                all_kinds.iter().any(|k| k == expected),
+                "stress-test.md should contain {expected} blocks (found: {all_kinds:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stress_testdata_layout_without_panic() {
+        // Verify the layout engine handles the stress document at various widths.
+        use crate::layout::flatten;
+        let source = include_str!("../testdata/stress-test.md");
+        let blocks = parse(source, h());
+        for width in [20u16, 40, 80, 120, 220] {
+            let doc = flatten(&blocks, width);
+            assert!(
+                doc.total_height > 0,
+                "layout at width={width} should produce lines"
+            );
+        }
     }
 
     // ── Security regression tests ────────────────────────────────

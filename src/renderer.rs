@@ -12,9 +12,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui_image::StatefulImage;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
+use crate::images::ImageManager;
 use crate::layout::DocumentLine;
 
 /// Draws the current view of the document and status bar to the frame.
@@ -22,7 +24,7 @@ use crate::layout::DocumentLine;
 /// The content area occupies all rows except the last, which is reserved
 /// for the status bar. For extremely small terminals (height < 2), only
 /// the status bar is rendered.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
     let area = frame.area();
 
     // Reserve the bottom row for the status bar.
@@ -92,6 +94,26 @@ pub fn draw(frame: &mut Frame, app: &App) {
                         Line::from(Span::styled(rule_char, Style::default().add_modifier(Modifier::DIM)));
                     let paragraph = Paragraph::new(rule_line);
                     frame.render_widget(paragraph, line_area);
+                }
+                DocumentLine::ImageStart { protocol_index, height } => {
+                    // Clamp height to remaining viewport space so the image
+                    // doesn't overwrite the status bar.
+                    let available = content_area.height.saturating_sub(i as u16);
+                    let render_height = (*height).min(available);
+                    if render_height > 0 {
+                        let img_area = Rect {
+                            x: content_area.x,
+                            y,
+                            width: content_area.width,
+                            height: render_height,
+                        };
+                        let protocol = images.get_protocol(*protocol_index);
+                        let widget = StatefulImage::default();
+                        frame.render_stateful_widget(widget, img_area, protocol);
+                    }
+                }
+                DocumentLine::ImageContinuation => {
+                    // Space already reserved by the ImageStart rendering above.
                 }
             }
         }

@@ -34,6 +34,10 @@ pub enum DocumentLine {
     Empty,
     /// A horizontal rule spanning the terminal width.
     Rule,
+    /// The first line of an image — triggers rendering at draw time.
+    ImageStart { protocol_index: usize, height: u16 },
+    /// Continuation lines for an image — reserves vertical space for scrolling.
+    ImageContinuation,
 }
 
 /// Flattens a sequence of `RenderedBlock`s into a `PreRenderedDocument`.
@@ -109,6 +113,39 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize) 
         RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth),
         RenderedBlock::Table { headers, alignments, rows } => {
             flatten_table(headers, alignments, rows, width)
+        }
+        // Phase 4: images are rendered by the renderer via StatefulImage.
+        // Layout emits ImageStart for the first row (renderer draws there) and
+        // ImageContinuation for remaining rows (reserve scroll space).
+        RenderedBlock::Image { protocol_index, height_cells, alt_text, .. } => {
+            let height = *height_cells;
+            if height == 0 {
+                // Degenerate case: emit a fallback text line so the image
+                // is not completely invisible.
+                return vec![DocumentLine::Text(Line::from(Span::raw(
+                    format!("[image: {alt_text}]"),
+                )))];
+            }
+            let mut lines = Vec::with_capacity(height as usize);
+            lines.push(DocumentLine::ImageStart { protocol_index: *protocol_index, height });
+            for _ in 1..height {
+                lines.push(DocumentLine::ImageContinuation);
+            }
+            lines
+        }
+        RenderedBlock::ImageFallback { alt_text } => {
+            let wrapped = wrap_styled_spans(
+                &[crate::parser::StyledSpan {
+                    text: format!("[image: {}]", alt_text),
+                    style: Style::default().add_modifier(Modifier::DIM),
+                }],
+                width,
+            );
+            if wrapped.is_empty() {
+                vec![DocumentLine::Empty]
+            } else {
+                wrapped.into_iter().map(DocumentLine::Text).collect()
+            }
         }
     }
 }
@@ -255,6 +292,11 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usi
                         Span::styled(PREFIX.to_string(), quote_style),
                         Span::styled("─".repeat(inner_width), quote_style),
                     ])));
+                }
+                // Images inside block quotes: pass through with prefix.
+                // The renderer draws at absolute position within the allocated area.
+                DocumentLine::ImageStart { .. } | DocumentLine::ImageContinuation => {
+                    result.push(line);
                 }
             }
         }
