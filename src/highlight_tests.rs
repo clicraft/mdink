@@ -138,6 +138,28 @@
         assert!(has_italic, "comment spans should have ITALIC modifier");
     }
 
+    // ── PowerShell syntax tests ─────────────────────────────────
+
+    #[test]
+    fn test_highlight_powershell_code() {
+        let code = "Get-Process | Where-Object { $_.CPU -gt 10 }\n";
+        let lines = highlighter().highlight_code(code, "ps1", DEFAULT_THEME);
+        assert!(!lines.is_empty(), "PowerShell code should produce lines");
+        let has_color = lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.fg != Some(Color::default()))
+        });
+        assert!(has_color, "PowerShell code should have syntax coloring");
+    }
+
+    #[test]
+    fn test_highlight_powershell_token_alias() {
+        let code = "$x = 42\n";
+        let lines = highlighter().highlight_code(code, "powershell", DEFAULT_THEME);
+        assert!(!lines.is_empty(), "'powershell' token should resolve");
+    }
+
     #[test]
     fn test_highlight_non_comment_no_forced_italic() {
         let code = "let x = 42;\n";

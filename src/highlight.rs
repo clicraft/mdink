@@ -11,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
-use syntect::parsing::{Scope, SyntaxSet};
+use syntect::parsing::{Scope, SyntaxDefinition, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 /// Wraps syntect's syntax and theme sets, loaded once at startup.
@@ -30,7 +30,7 @@ impl Highlighter {
     /// Creates a new `Highlighter` with default syntax and theme sets.
     pub fn new() -> Self {
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: load_syntax_set(),
             theme_set: ThemeSet::load_defaults(),
         }
     }
@@ -113,6 +113,23 @@ impl Highlighter {
 
         result
     }
+}
+
+/// Builds the syntax set: defaults + bundled extra syntaxes.
+///
+/// Extra syntaxes are embedded at compile time via `include_str!`
+/// so the binary remains self-contained.
+fn load_syntax_set() -> SyntaxSet {
+    let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+
+    // PowerShell: not in syntect's defaults (Sublime's default packages omit it).
+    const POWERSHELL_SYNTAX: &str =
+        include_str!("../assets/syntaxes/PowerShell.sublime-syntax");
+    if let Ok(def) = SyntaxDefinition::load_from_str(POWERSHELL_SYNTAX, true, None) {
+        builder.add(def);
+    }
+
+    builder.build()
 }
 
 /// Resolves the foreground color that the given theme assigns to the `comment` scope.
