@@ -57,6 +57,7 @@ jobs:
           CROSS_LINKER: ${{ matrix.cross_linker }}
 
       - name: Build
+        shell: bash
         run: cargo build --profile dist --target "$TARGET"
         env:
           TARGET: ${{ matrix.target }}

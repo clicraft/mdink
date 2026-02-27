@@ -58,10 +58,7 @@ section = "utils"
 priority = "optional"
 depends = "$auto"
 assets = [
-    ["target/release/mdink",                  "usr/bin/",                                "755"],
-    ["assets/mdink.1.gz",                     "usr/share/man/man1/",                     "644"],
-    ["assets/completions/mdink.bash",         "usr/share/bash-completion/completions/",  "644"],
-    ["assets/completions/mdink.fish",         "usr/share/fish/vendor_completions.d/",    "644"],
-    ["assets/completions/_mdink",             "usr/share/zsh/vendor-completions/",       "644"],
-    ["README.md",                             "usr/share/doc/mdink/README",              "644"],
+    ["target/release/mdink", "usr/bin/",                      "755"],
+    ["README.md",            "usr/share/doc/mdink/README",    "644"],
+    # Phase 7 will add: man page, bash/fish/zsh completions
 ]
