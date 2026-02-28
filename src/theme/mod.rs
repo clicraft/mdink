@@ -181,7 +181,7 @@ pub struct OutlinePanelStyle {
     pub h1_fg: Option<String>,
     pub h2_fg: Option<String>,
     pub h3_fg: Option<String>,
-    pub width: u16,
+    pub width_percent: u16,
 }
 
 impl Default for OutlinePanelStyle {
@@ -195,7 +195,7 @@ impl Default for OutlinePanelStyle {
             h1_fg: Some("light_cyan".to_string()),
             h2_fg: Some("green".to_string()),
             h3_fg: Some("yellow".to_string()),
-            width: 30,
+            width_percent: 25,
         }
     }
 }
@@ -306,8 +306,8 @@ impl MarkdownTheme {
             self.list.indent_size = 2;
         }
 
-        // Outline panel width: clamp to 15..=60.
-        self.outline.width = self.outline.width.clamp(15, 60);
+        // Outline panel width percent: clamp to 10..=33 (hard cap at 1/3).
+        self.outline.width_percent = self.outline.width_percent.clamp(10, 33);
     }
 
     /// Removes all color fields while preserving structural modifiers and text.

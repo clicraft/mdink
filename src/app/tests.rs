@@ -294,3 +294,93 @@
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
         assert_eq!(app.scroll_offset, 0);
     }
+
+    // ── Outline resize tests ────────────────────────────────────────
+
+    #[test]
+    fn test_outline_grow() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        app.needs_reflatten = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::empty()));
+        assert_eq!(app.outline_width_percent, Some(27)); // 25 default + 2
+        assert!(app.needs_reflatten);
+    }
+
+    #[test]
+    fn test_outline_shrink() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        app.needs_reflatten = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::empty()));
+        assert_eq!(app.outline_width_percent, Some(23)); // 25 default - 2
+        assert!(app.needs_reflatten);
+    }
+
+    #[test]
+    fn test_outline_grow_capped_at_33() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        app.outline_width_percent = Some(32);
+        app.needs_reflatten = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::empty()));
+        assert_eq!(app.outline_width_percent, Some(33));
+    }
+
+    #[test]
+    fn test_outline_shrink_floored_at_10() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        app.outline_width_percent = Some(11);
+        app.needs_reflatten = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::empty()));
+        assert_eq!(app.outline_width_percent, Some(10));
+    }
+
+    #[test]
+    fn test_outline_resize_without_outline_is_noop() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::empty()));
+        assert!(app.outline_width_percent.is_none());
+        assert!(!app.needs_reflatten);
+    }
+
+    #[test]
+    fn test_outline_panel_cols() {
+        let app = make_app_with_headings(20, 5, sample_headings());
+        // Default: 25%. Terminal width 120 -> 30 columns. 120/3 = 40. min(30,40) = 30.
+        assert_eq!(app.outline_panel_cols(120), 30);
+        // Terminal width 60 -> 15 columns. 60/3 = 20. min(15,20) = 15.
+        assert_eq!(app.outline_panel_cols(60), 15);
+    }
+
+    #[test]
+    fn test_outline_panel_cols_hard_cap() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        // Override to 33%. Terminal width 120 -> 39. 120/3 = 40. min(39,40) = 39.
+        app.outline_width_percent = Some(33);
+        assert_eq!(app.outline_panel_cols(120), 39);
+    }
+
+    #[test]
+    fn test_outline_width_persists_across_toggle() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        app.needs_reflatten = false;
+
+        // Resize.
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::empty()));
+        assert_eq!(app.outline_width_percent, Some(27));
+
+        // Close and reopen.
+        app.needs_reflatten = false;
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+
+        // Override should persist.
+        assert_eq!(app.outline_width_percent, Some(27));
+    }

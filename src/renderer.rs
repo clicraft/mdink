@@ -43,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
 
     // Calculate layout rects.
     let (panel_rect, border_rect, content_area) = if side_panel {
-        let panel_w = app.theme.outline.width.min(area.width / 3);
+        let panel_w = app.outline_panel_cols(area.width);
         let pr = Rect {
             x: area.x,
             y: area.y,
@@ -442,7 +442,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Build hint text based on outline state and mode.
     let hints = if app.outline.is_some() {
         if area.width >= OUTLINE_MIN_COLS {
-            "Tab:nav Enter:jump o:close"
+            "Tab:nav Enter:jump <>:size o:close"
         } else {
             "Tab:nav Enter:jump Esc:close"
         }

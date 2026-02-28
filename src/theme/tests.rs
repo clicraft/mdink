@@ -334,7 +334,7 @@ fn test_loaded_dark_matches_default_theme() {
     assert_eq!(outline_selected_style(&loaded.outline), outline_selected_style(&default.outline), "outline selected");
     assert_eq!(outline_border_style(&loaded.outline), outline_border_style(&default.outline), "outline border");
     assert_eq!(outline_bg_style(&loaded.outline), outline_bg_style(&default.outline), "outline bg");
-    assert_eq!(loaded.outline.width, default.outline.width, "outline width");
+    assert_eq!(loaded.outline.width_percent, default.outline.width_percent, "outline width_percent");
 }
 
 // ── Default theme regression ─────────────────────────────────────────────────
@@ -477,17 +477,17 @@ fn test_sanitize_empty_bullet_vec() {
 }
 
 #[test]
-fn test_sanitize_outline_width_clamped() {
-    let json = r#"{"name": "narrow", "outline": {"width": 5}}"#;
+fn test_sanitize_outline_width_percent_clamped() {
+    let json = r#"{"name": "narrow", "outline": {"width_percent": 5}}"#;
     let mut theme: MarkdownTheme = serde_json::from_str(json).expect("parse");
-    assert_eq!(theme.outline.width, 5);
+    assert_eq!(theme.outline.width_percent, 5);
     theme.sanitize();
-    assert_eq!(theme.outline.width, 15, "outline width should be clamped to minimum 15");
+    assert_eq!(theme.outline.width_percent, 10, "outline width_percent should be clamped to minimum 10");
 
-    let json2 = r#"{"name": "wide", "outline": {"width": 100}}"#;
+    let json2 = r#"{"name": "wide", "outline": {"width_percent": 50}}"#;
     let mut theme2: MarkdownTheme = serde_json::from_str(json2).expect("parse");
     theme2.sanitize();
-    assert_eq!(theme2.outline.width, 60, "outline width should be clamped to maximum 60");
+    assert_eq!(theme2.outline.width_percent, 33, "outline width_percent should be clamped to maximum 33");
 }
 
 #[test]
@@ -553,7 +553,7 @@ fn test_theme_roundtrip() {
     assert_eq!(roundtripped.outline.h1_fg, original.outline.h1_fg);
     assert_eq!(roundtripped.outline.h2_fg, original.outline.h2_fg);
     assert_eq!(roundtripped.outline.h3_fg, original.outline.h3_fg);
-    assert_eq!(roundtripped.outline.width, original.outline.width);
+    assert_eq!(roundtripped.outline.width_percent, original.outline.width_percent);
 }
 
 // ── strip_colors ─────────────────────────────────────────────────────────────
@@ -635,8 +635,8 @@ fn test_strip_colors_preserves_modifiers() {
     assert_eq!(theme.thematic_break.char_, "─");
     assert_eq!(theme.block_quote.prefix, "│ ");
     assert_eq!(theme.list.bullet, vec!["•", "◦", "▪"]);
-    // Outline width preserved.
-    assert_eq!(theme.outline.width, 30);
+    // Outline width_percent preserved.
+    assert_eq!(theme.outline.width_percent, 25);
     // Syntect theme cleared (signals no highlighting).
     assert!(theme.syntect_theme.is_empty());
 }

@@ -42,6 +42,9 @@ pub struct App {
     /// Heading index set by Enter in outline mode; main.rs resolves this
     /// to a line index after any pending reflatten, then scrolls there.
     pub pending_jump: Option<usize>,
+    /// Session-only outline width override (percentage). `None` = use theme default.
+    /// Set by `<`/`>` keys at runtime; not persisted.
+    pub outline_width_percent: Option<u16>,
 }
 
 impl App {
@@ -60,6 +63,7 @@ impl App {
             outline: None,
             needs_reflatten: false,
             pending_jump: None,
+            outline_width_percent: None,
         }
     }
 
@@ -83,6 +87,14 @@ impl App {
                 KeyCode::Esc => {
                     self.outline = None;
                     self.needs_reflatten = true;
+                    return;
+                }
+                KeyCode::Char('>') => {
+                    self.outline_grow();
+                    return;
+                }
+                KeyCode::Char('<') => {
+                    self.outline_shrink();
                     return;
                 }
                 _ => {} // fall through to normal keys
@@ -161,6 +173,35 @@ impl App {
                 self.pending_jump = Some(state.selected);
             }
         }
+    }
+
+    /// Returns the effective outline width percentage (override or theme default).
+    fn effective_outline_percent(&self) -> u16 {
+        self.outline_width_percent.unwrap_or(self.theme.outline.width_percent)
+    }
+
+    /// Returns the outline panel width in columns for the given terminal width.
+    ///
+    /// Applies the percentage from the runtime override (if set) or the theme,
+    /// then clamps to at most 1/3 of the terminal width.
+    pub fn outline_panel_cols(&self, terminal_width: u16) -> u16 {
+        let percent = self.effective_outline_percent();
+        let from_percent = (terminal_width as u32 * percent as u32 / 100) as u16;
+        from_percent.min(terminal_width / 3)
+    }
+
+    /// Increases the outline panel width by 2 percentage points (capped at 33%).
+    fn outline_grow(&mut self) {
+        let new = (self.effective_outline_percent() + 2).min(33);
+        self.outline_width_percent = Some(new);
+        self.needs_reflatten = true;
+    }
+
+    /// Decreases the outline panel width by 2 percentage points (min 10%).
+    fn outline_shrink(&mut self) {
+        let new = self.effective_outline_percent().saturating_sub(2).max(10);
+        self.outline_width_percent = Some(new);
+        self.needs_reflatten = true;
     }
 
     /// Returns the range of line indices visible in the current viewport.

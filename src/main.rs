@@ -213,7 +213,7 @@ fn main() -> color_eyre::Result<()> {
 /// terminal width is available.
 fn compute_content_width(cols: u16, app: &App) -> u16 {
     if app.outline.is_some() && cols >= renderer::OUTLINE_MIN_COLS {
-        let panel_w = app.theme.outline.width.min(cols / 3);
+        let panel_w = app.outline_panel_cols(cols);
         cols.saturating_sub(panel_w + 1 + renderer::OUTLINE_CONTENT_PAD)
     } else {
         cols

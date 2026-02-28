@@ -55,7 +55,7 @@
     "h1_fg": "#bd93f9",
     "h2_fg": "#50fa7b",
     "h3_fg": "#ff79c6",
-    "width": 30
+    "width_percent": 25
   },
   "status_bar": {
     "fg": "#f8f8f2",

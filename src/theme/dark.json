@@ -52,7 +52,7 @@
     "h1_fg": "light_cyan",
     "h2_fg": "green",
     "h3_fg": "yellow",
-    "width": 30
+    "width_percent": 25
   },
   "status_bar": {
     "fg": "black",

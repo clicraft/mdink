@@ -52,7 +52,7 @@
     "h1_fg": "blue",
     "h2_fg": "green",
     "h3_fg": "magenta",
-    "width": 30
+    "width_percent": 25
   },
   "status_bar": {
     "fg": "white",
