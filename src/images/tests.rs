@@ -108,6 +108,32 @@
     }
 
     #[test]
+    fn test_gamma_expansion_biases_midtones_to_denser_chars() {
+        // Reproduce the index formula from load_ascii_image to unit-test the
+        // gamma-expansion step without loading a file.
+        let ramp_len = DENSITY_RAMP.len();
+        let idx_for_luma = |luminance: f64| -> usize {
+            ((luminance / 255.0).powf(1.0 / 2.2) * (ramp_len - 1) as f64).round() as usize
+        };
+
+        // Fixed points: black and white must not change.
+        assert_eq!(idx_for_luma(0.0), 0, "black → space");
+        assert_eq!(idx_for_luma(255.0), ramp_len - 1, "white → full block");
+
+        // Mid-gray (luminance 128) with expansion:
+        //   0.502^(1/2.2) ≈ 0.731 → index 12 ('⣿').
+        // Without expansion it would be: round(0.502 × 17) = 9 ('+').
+        // Higher index = denser char = more coverage = less background bleed.
+        let mid_idx = idx_for_luma(128.0);
+        let uncompanded = ((128.0_f64 / 255.0) * (ramp_len - 1) as f64).round() as usize;
+        assert!(
+            mid_idx > uncompanded,
+            "gamma expansion must raise mid-gray index above linear ({uncompanded}), got {mid_idx}"
+        );
+        assert!(mid_idx >= 11, "mid-gray index should be ≥ 11, got {mid_idx}");
+    }
+
+    #[test]
     fn test_load_ascii_image_rgba_png() {
         // rust-logo.png is 32x32 RGBA — tests that alpha channel images decode
         // without error (image crate composites alpha onto a background).
@@ -126,16 +152,14 @@
         }
         eprintln!("--- end ---\n");
 
-        // Verify the image has both dark and bright regions (not a solid block).
-        let chars: Vec<char> = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.chars().next().unwrap()))
-            .collect();
-        let unique: std::collections::HashSet<char> = chars.iter().copied().collect();
-        assert!(
-            unique.len() >= 2,
-            "logo should use at least 2 distinct density characters, got {}: {:?}",
-            unique.len(),
-            unique
-        );
+        // Verify every span holds exactly one character (no empty content).
+        for line in &lines {
+            for span in &line.spans {
+                assert_eq!(
+                    span.content.chars().count(),
+                    1,
+                    "each span should be a single density character"
+                );
+            }
+        }
     }

@@ -225,7 +225,12 @@ impl ImageManager {
                 let pixel = rgb.get_pixel(x, y);
                 let [r, g, b] = pixel.0;
                 let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
-                let idx = ((luminance / 255.0) * (ramp_len - 1) as f64).round() as usize;
+                // Gamma-expand before ramp lookup. A linear luma→index mapping causes
+                // mid-tones to select sparse characters whose black background bleed
+                // darkens the image; raising to 1/2.2 biases toward denser characters
+                // and recovers perceived brightness.
+                let idx = ((luminance / 255.0).powf(1.0 / 2.2) * (ramp_len - 1) as f64).round()
+                    as usize;
                 let ch = DENSITY_RAMP[idx.min(ramp_len - 1)];
                 spans.push(Span::styled(
                     ch.to_string(),
