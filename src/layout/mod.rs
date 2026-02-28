@@ -429,7 +429,8 @@ fn flatten_table(
         sep_style,
     ))));
 
-    // Body rows.
+    // Body rows. Insert a blank separator between rows when any row wraps.
+    let mut prev_row_was_multi = false;
     for row in rows {
         let cell_lines: Vec<Vec<Vec<Span<'static>>>> = col_widths
             .iter()
@@ -443,7 +444,13 @@ fn flatten_table(
                 }
             })
             .collect();
+        let row_height = cell_lines.iter().map(|cl| cl.len()).max().unwrap_or(1);
+        // Add blank separator between multi-line rows for readability.
+        if prev_row_was_multi || (row_height > 1 && !result.is_empty()) {
+            result.push(build_blank_table_row(&col_widths));
+        }
         result.extend(build_multi_line_row(&cell_lines, &col_widths));
+        prev_row_was_multi = row_height > 1;
     }
 
     result
@@ -466,7 +473,7 @@ fn cell_display_width(cell: &TableCell) -> usize {
 
 /// Converts one table cell into lines of spans (outer vec = lines, inner = spans per line).
 ///
-/// Text cells produce a single line (padded/truncated to `col_width`).
+/// Text cells are word-wrapped to `col_width` and may produce multiple lines.
 /// AsciiImage cells produce N lines (one per image row), each truncated to `col_width`.
 fn flatten_cell_to_lines(
     cell: &TableCell,
@@ -476,14 +483,43 @@ fn flatten_cell_to_lines(
 ) -> Vec<Vec<Span<'static>>> {
     let lines = match cell {
         TableCell::Text(spans) => {
-            let plain: String = spans.iter().map(|s| s.text.as_str()).collect();
-            let padded = align_cell(&plain, col_width, alignment);
-            let span = if let Some(style) = header_style {
-                Span::styled(padded, style)
-            } else {
-                Span::raw(padded)
-            };
-            vec![vec![span]]
+            let wrapped = wrap_styled_spans(spans, col_width);
+            wrapped
+                .into_iter()
+                .map(|line| {
+                    let line_width: usize =
+                        line.spans.iter().map(|s| s.content.width()).sum();
+                    let mut out_spans: Vec<Span<'static>> = line
+                        .spans
+                        .into_iter()
+                        .map(|s| {
+                            if let Some(style) = header_style {
+                                Span::styled(s.content.into_owned(), style)
+                            } else {
+                                Span::styled(s.content.into_owned(), s.style)
+                            }
+                        })
+                        .collect();
+                    if line_width < col_width {
+                        let padding = col_width - line_width;
+                        match alignment {
+                            Alignment::Right => {
+                                out_spans.insert(0, Span::raw(" ".repeat(padding)));
+                            }
+                            Alignment::Center => {
+                                let left = padding / 2;
+                                let right = padding - left;
+                                out_spans.insert(0, Span::raw(" ".repeat(left)));
+                                out_spans.push(Span::raw(" ".repeat(right)));
+                            }
+                            _ => {
+                                out_spans.push(Span::raw(" ".repeat(padding)));
+                            }
+                        }
+                    }
+                    out_spans
+                })
+                .collect()
         }
         TableCell::Block(RenderedBlock::AsciiImage { lines, .. }) => {
             lines
@@ -564,6 +600,18 @@ fn build_multi_line_row(
     }
 
     result
+}
+
+/// Builds a blank row with column separators (spaces + `│`) for visual spacing.
+fn build_blank_table_row(col_widths: &[usize]) -> DocumentLine {
+    let mut spans = Vec::new();
+    for (i, &w) in col_widths.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" │ ".to_string()));
+        }
+        spans.push(Span::raw(" ".repeat(w)));
+    }
+    DocumentLine::Text(Line::from(spans))
 }
 
 /// Builds the separator row (`───┼───`) for a table.

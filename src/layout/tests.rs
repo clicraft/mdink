@@ -560,6 +560,100 @@
     }
 
     #[test]
+    fn test_table_cell_wraps_long_text() {
+        use pulldown_cmark::Alignment;
+        let long_text = "This is a long description that should wrap to multiple lines";
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Key"), make_cell("Description")],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec![make_cell("A"), make_cell(long_text)]],
+        }];
+        // Width 40: two columns share ~17 cols each (minus separators).
+        // "This is a long description..." at 60 chars must wrap.
+        let doc = flatten_default(&blocks, 40);
+        // Header (1 line) + separator (1) + data row (>1 line) = >3 total.
+        assert!(
+            doc.total_height > 3,
+            "long cell should wrap to multiple lines, got {} lines",
+            doc.total_height
+        );
+        // Verify the full text is present (not truncated).
+        let all_text: String = doc
+            .lines
+            .iter()
+            .filter_map(|l| match l {
+                DocumentLine::Text(line) => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect();
+        // All words from the long text should appear across the wrapped lines.
+        for word in long_text.split_whitespace() {
+            assert!(all_text.contains(word), "word '{word}' missing from table output");
+        }
+    }
+
+    #[test]
+    fn test_table_wrapped_cell_aligned_right() {
+        use pulldown_cmark::Alignment;
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Val")],
+            alignments: vec![Alignment::Right],
+            rows: vec![vec![make_cell("a fairly long cell value here")]],
+        }];
+        let doc = flatten_default(&blocks, 20);
+        // With right alignment, each wrapped line should have leading spaces.
+        // Skip header (line 0) and separator (line 1), check data row lines.
+        for line in doc.lines.iter().skip(2) {
+            if let DocumentLine::Text(l) = line {
+                let first_content = &l.spans[0].content;
+                // Right-aligned lines should start with padding spaces.
+                assert!(
+                    first_content.starts_with(' ') || first_content.trim().is_empty(),
+                    "right-aligned line should have leading space: {first_content:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_multi_row_different_heights() {
+        use pulldown_cmark::Alignment;
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("A"), make_cell("B")],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec![
+                make_cell("short"),
+                make_cell("this cell has much longer text that must wrap to several lines"),
+            ]],
+        }];
+        let doc = flatten_default(&blocks, 40);
+        // The row should have multiple lines; the short cell should be padded.
+        assert!(doc.total_height > 3, "multi-height row should produce extra lines");
+        // All data row lines (after header + separator) should contain the " │ " separator.
+        for line in doc.lines.iter().skip(2) {
+            if let DocumentLine::Text(l) = line {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(text.contains("│"), "each row line should have column separator: {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_cell_single_line_no_change() {
+        use pulldown_cmark::Alignment;
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("K"), make_cell("V")],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec![make_cell("a"), make_cell("b")]],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        // Short cells that fit: header + separator + 1 data row = exactly 3.
+        assert_eq!(doc.total_height, 3, "short cells should not wrap");
+    }
+
+    #[test]
     fn test_layout_list_child_code_block_is_indented() {
         // A code block nested inside a list item should be indented to match
         // the item's content column, not rendered flush with the left edge.
@@ -791,10 +885,10 @@
             ]],
         }];
         let doc = flatten_default(&blocks, 80);
-        // header(1) + sep(1) + row(3, because image is 3 lines) = 5
+        // header(1) + sep(1) + blank_sep(1) + row(3, because image is 3 lines) = 6
         assert_eq!(
-            doc.total_height, 5,
-            "table with 3-line image cell should produce 5 lines, got {}",
+            doc.total_height, 6,
+            "table with 3-line image cell should produce 6 lines, got {}",
             doc.total_height
         );
         // All lines should be Text (table output is always Text lines).
@@ -880,12 +974,12 @@
             ]],
         }];
         let doc = flatten_default(&blocks, 60);
-        // header(1) + sep(1) + row(5) = 7
-        assert_eq!(doc.total_height, 7);
+        // header(1) + sep(1) + blank_sep(1) + row(5) = 8
+        assert_eq!(doc.total_height, 8);
 
-        // Measure every line's display width in the body row (indices 2..7).
+        // Measure every line's display width in the body row (indices 3..8).
         let mut widths: Vec<usize> = Vec::new();
-        for line_idx in 2..7 {
+        for line_idx in 3..8 {
             if let DocumentLine::Text(line) = &doc.lines[line_idx] {
                 let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
                 widths.push(w);
@@ -911,8 +1005,8 @@
             );
         }
 
-        // First body line (index 2) should have RGB-colored spans from the image.
-        if let DocumentLine::Text(first_row) = &doc.lines[2] {
+        // First body content line (index 3, after blank sep) should have RGB-colored spans.
+        if let DocumentLine::Text(first_row) = &doc.lines[3] {
             let has_rgb = first_row.spans.iter().any(|s| {
                 matches!(s.style.fg, Some(Color::Rgb(_, _, _)))
             });
@@ -949,11 +1043,11 @@
             ]],
         }];
         let doc = flatten_default(&blocks, 60);
-        // header(1) + sep(1) + row(7) = 9
-        assert_eq!(doc.total_height, 9, "row height should be max(3,7) = 7");
+        // header(1) + sep(1) + blank_sep(1) + row(7) = 10
+        assert_eq!(doc.total_height, 10, "row height should be max(3,7) = 7");
 
-        // Check width consistency on all body-row lines.
-        let body_widths: Vec<usize> = (2..9)
+        // Check width consistency on all body-row lines (skip blank sep at index 2).
+        let body_widths: Vec<usize> = (3..10)
             .filter_map(|i| {
                 if let DocumentLine::Text(line) = &doc.lines[i] {
                     Some(line.spans.iter().map(|s| s.content.width()).sum())

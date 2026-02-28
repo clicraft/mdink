@@ -1180,10 +1180,10 @@
         let doc = crate::layout::flatten(&blocks, 80, &theme);
         let row_height = img_a_lines.max(img_b_lines); // 16
         assert_eq!(row_height, 16);
-        // header(1) + separator(1) + body_row(16) = 18
+        // header(1) + separator(1) + blank_sep(1) + body_row(16) = 19
         assert_eq!(
-            doc.total_height, 18,
-            "expected 18 lines (1 header + 1 sep + 16 row), got {}",
+            doc.total_height, 19,
+            "expected 19 lines (1 header + 1 sep + 1 blank + 16 row), got {}",
             doc.total_height
         );
 
@@ -1196,15 +1196,15 @@
         }
 
         // ── Column separator alignment check ───────────────────────
-        // Every line in the body row (lines 2..18) must have the " │ "
-        // separator at the same *display column*, proving that cell widths
-        // are consistent across all 16 lines of the multi-line row.
+        // Every line in the body row (lines 3..19, skipping blank sep at 2)
+        // must have the " │ " separator at the same *display column*, proving
+        // that cell widths are consistent across all 16 lines of the row.
         //
         // We measure display-column offset (not byte offset) because the
         // density ramp includes multi-byte characters (braille, block shading)
         // whose byte widths vary per row even though display widths are uniform.
         let mut sep_display_cols: Vec<Option<usize>> = Vec::new();
-        for line_idx in 2..18 {
+        for line_idx in 3..19 {
             if let crate::layout::DocumentLine::Text(line) = &doc.lines[line_idx] {
                 // Walk spans, accumulating display width until we find " │ ".
                 let mut col = 0usize;
@@ -1237,9 +1237,8 @@
 
         // ── Image color preservation check ─────────────────────────
         // The gradient image must produce spans with non-default RGB colors
-        // in the first body-row line (line index 2). This confirms that
-        // image colors survive the flatten_cell_to_lines → truncate path.
-        if let crate::layout::DocumentLine::Text(line) = &doc.lines[2] {
+        // in the first body-row content line (index 3, after blank sep at 2).
+        if let crate::layout::DocumentLine::Text(line) = &doc.lines[3] {
             let has_rgb = line.spans.iter().any(|s| {
                 matches!(
                     s.style.fg,
@@ -1270,12 +1269,12 @@
         let blocks = super::parse(md, h(), &mut im, &theme);
         let doc = crate::layout::flatten(&blocks, 80, &theme);
 
-        // header(1) + sep(1) + row(8) = 10
-        assert_eq!(doc.total_height, 10, "expected 10 lines, got {}", doc.total_height);
+        // header(1) + sep(1) + blank_sep(1) + row(8) = 11
+        assert_eq!(doc.total_height, 11, "expected 11 lines, got {}", doc.total_height);
 
-        // Collect all row lines (indices 2..10).
+        // Collect all row lines (indices 3..11, skipping blank sep at 2).
         let mut row_texts: Vec<String> = Vec::new();
-        for line_idx in 2..10 {
+        for line_idx in 3..11 {
             if let crate::layout::DocumentLine::Text(line) = &doc.lines[line_idx] {
                 row_texts.push(
                     line.spans.iter().map(|s| s.content.as_ref()).collect(),

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-02-28
+
+### Added
+- **Table cell word-wrapping** — long text in table cells now wraps to multiple lines instead of being truncated, preserving inline styles (bold, italic, code) across line breaks
+- **Table row separators** — blank separator lines are inserted between multi-line rows for improved readability
+- Column alignment (left, center, right) is respected on each wrapped line
+- Stress-test file `testdata/tables-wrap.md` covering CJK, styled content, mixed alignment, and narrow-terminal edge cases
+
 ## [0.2.0] - 2026-02-28
 
 ### Added
