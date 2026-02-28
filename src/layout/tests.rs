@@ -637,6 +637,34 @@
         }
     }
 
+    // ── ASCII image layout tests ─────────────────────────────────
+
+    #[test]
+    fn test_layout_ascii_image_produces_ascii_art_lines() {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(".", Style::default().fg(Color::Rgb(100, 100, 100))),
+                Span::styled("#", Style::default().fg(Color::Rgb(200, 200, 200))),
+            ]),
+            Line::from(vec![
+                Span::styled("@", Style::default().fg(Color::Rgb(255, 255, 255))),
+                Span::styled(" ", Style::default().fg(Color::Rgb(0, 0, 0))),
+            ]),
+        ];
+        let blocks = vec![RenderedBlock::AsciiImage {
+            lines,
+            alt_text: "test".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.total_height, 2, "each image line becomes a DocumentLine");
+        for line in &doc.lines {
+            assert!(
+                matches!(line, DocumentLine::AsciiArt(_)),
+                "AsciiImage should produce AsciiArt lines"
+            );
+        }
+    }
+
     #[test]
     fn test_layout_block_quote_inside_list_preserves_list_depth() {
         // A block quote inside a list item (depth=1) should thread list_depth

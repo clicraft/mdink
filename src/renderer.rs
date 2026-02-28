@@ -105,6 +105,10 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     let paragraph = Paragraph::new(rule_line);
                     frame.render_widget(paragraph, line_area);
                 }
+                DocumentLine::AsciiArt(line) => {
+                    let paragraph = Paragraph::new(line.clone());
+                    frame.render_widget(paragraph, line_area);
+                }
                 DocumentLine::ImageStart { protocol_index, height } => {
                     // Clamp height to remaining viewport space so the image
                     // doesn't overwrite the status bar.

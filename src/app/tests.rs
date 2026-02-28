@@ -140,6 +140,16 @@
     }
 
     #[test]
+    fn test_app_handle_key_refresh_r() {
+        let mut app = make_app(10, 5);
+        assert!(!app.refresh_requested);
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty());
+        app.handle_key(key);
+        assert!(app.refresh_requested);
+        assert!(!app.quit, "r should not quit");
+    }
+
+    #[test]
     fn test_app_handle_key_scroll_k() {
         let mut app = make_app(20, 5);
         app.scroll_offset = 5;

@@ -10,12 +10,14 @@
     }
 
     /// Wrapper so every test can call `parse(md, h())` without constructing an
-    /// ImageManager. Tests that need images should call `super::parse` directly.
+    /// ImageManager. Uses no_images=true so all images degrade to ImageFallback
+    /// (avoiding ASCII art attempts on test paths that don't exist).
     fn parse(source: &str, highlighter: &crate::highlight::Highlighter) -> Vec<RenderedBlock> {
         let mut im = crate::images::ImageManager::new(
             std::path::PathBuf::from("."),
-            None, // no Picker → all images degrade to ImageFallback
+            None, // no Picker
             80,
+            true, // no_images → always ImageFallback
         );
         let theme = crate::theme::default_theme();
         super::parse(source, highlighter, &mut im, &theme)
@@ -738,6 +740,7 @@
                     RenderedBlock::ThematicBreak => "ThematicBreak",
                     RenderedBlock::Spacer { .. } => "Spacer",
                     RenderedBlock::Image { .. } => "Image",
+                    RenderedBlock::AsciiImage { .. } => "AsciiImage",
                     RenderedBlock::ImageFallback { .. } => "ImageFallback",
                 }.to_string());
                 match b {
@@ -833,6 +836,58 @@
             }
             _ => panic!("expected List block"),
         }
+    }
+
+    // ── ASCII image fallback tests ──────────────────────────────
+
+    #[test]
+    fn test_parser_no_images_flag_produces_fallback() {
+        // When no_images=true, images must degrade to ImageFallback regardless
+        // of whether the file exists.
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            true, // explicitly disabled
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![photo](test-image.png)", h(), &mut im, &theme);
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "no_images=true should produce ImageFallback");
+    }
+
+    #[test]
+    fn test_parser_no_picker_real_image_produces_ascii_image() {
+        // picker=None + no_images=false + valid image file → AsciiImage.
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false, // images enabled, but no graphics protocol
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &theme);
+        let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+        assert!(ascii.is_some(), "picker=None + valid image should produce AsciiImage");
+        if let Some(RenderedBlock::AsciiImage { lines, alt_text }) = ascii {
+            assert!(!lines.is_empty(), "AsciiImage should have lines");
+            assert_eq!(alt_text, "gradient");
+        }
+    }
+
+    #[test]
+    fn test_parser_no_picker_missing_image_produces_fallback() {
+        // picker=None + no_images=false + missing file → ImageFallback.
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false,
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![missing](does-not-exist.png)", h(), &mut im, &theme);
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "missing file should produce ImageFallback");
     }
 
     #[test]

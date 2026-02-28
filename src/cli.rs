@@ -29,6 +29,7 @@ KEYBINDINGS:
   u / Page Up                Page up
   g / Home                   Go to top
   G / End                    Go to bottom
+  r                          Refresh / re-render
   q / Esc                    Quit
 
 THEMES:

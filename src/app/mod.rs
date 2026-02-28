@@ -29,6 +29,8 @@ pub struct App {
     pub filename: String,
     /// When true, the event loop should exit.
     pub quit: bool,
+    /// When true, the event loop should re-parse and re-render the document.
+    pub refresh_requested: bool,
 }
 
 impl App {
@@ -44,6 +46,7 @@ impl App {
             viewport_height: 0,
             filename,
             quit: false,
+            refresh_requested: false,
         }
     }
 
@@ -68,6 +71,8 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.scroll_to_top(),
             // Scroll to bottom (Shift+g = 'G')
             KeyCode::Char('G') | KeyCode::End => self.scroll_to_bottom(),
+            // Refresh / re-render
+            KeyCode::Char('r') => self.refresh_requested = true,
             // Quit
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             // Ctrl+C also quits

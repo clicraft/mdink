@@ -65,6 +65,13 @@ pub enum RenderedBlock {
         /// Image height in terminal cell rows.
         height_cells: u16,
     },
+    /// A colored ASCII art rendering of an image (used when no graphics protocol is available).
+    AsciiImage {
+        /// Pre-rendered colored lines (one Line per row of ASCII art).
+        lines: Vec<Line<'static>>,
+        /// Alt text for accessibility.
+        alt_text: String,
+    },
     /// An image that could not be loaded (missing file, no graphics support, etc.).
     ImageFallback {
         /// Alt text to display in place of the image.
@@ -276,19 +283,45 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InImage { dest_url, alt_buffer }) =
                     self.state_stack.pop()
                 {
-                    match self.images.load_image(&dest_url) {
-                        Ok((protocol_index, width_cells, height_cells)) => {
-                            self.emit_block(RenderedBlock::Image {
-                                protocol_index,
-                                alt_text: alt_buffer,
-                                width_cells,
-                                height_cells,
-                            });
+                    if self.images.images_disabled() {
+                        // User explicitly disabled images via --no-images.
+                        self.emit_block(RenderedBlock::ImageFallback {
+                            alt_text: alt_buffer,
+                        });
+                    } else if self.images.has_graphics_support() {
+                        // Terminal supports a graphics protocol — try native rendering.
+                        match self.images.load_image(&dest_url) {
+                            Ok((protocol_index, width_cells, height_cells)) => {
+                                self.emit_block(RenderedBlock::Image {
+                                    protocol_index,
+                                    alt_text: alt_buffer,
+                                    width_cells,
+                                    height_cells,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("warning: {e}");
+                                self.emit_block(RenderedBlock::ImageFallback {
+                                    alt_text: alt_buffer,
+                                });
+                            }
                         }
-                        Err(_) => {
-                            self.emit_block(RenderedBlock::ImageFallback {
-                                alt_text: alt_buffer,
-                            });
+                    } else {
+                        // No graphics protocol — fall back to colored ASCII art.
+                        let width = self.images.max_width();
+                        match self.images.load_ascii_image(&dest_url, width) {
+                            Ok(lines) => {
+                                self.emit_block(RenderedBlock::AsciiImage {
+                                    lines,
+                                    alt_text: alt_buffer,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("warning: {e}");
+                                self.emit_block(RenderedBlock::ImageFallback {
+                                    alt_text: alt_buffer,
+                                });
+                            }
                         }
                     }
                 }

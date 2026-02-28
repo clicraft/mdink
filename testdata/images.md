@@ -16,6 +16,10 @@ An image with no alt text:
 
 ![Color gradient](gradient.png)
 
+## Rust logo (RGBA with transparency)
+
+![Rust logo](rust-logo.png)
+
 ## Images in context
 
 Text before the image.

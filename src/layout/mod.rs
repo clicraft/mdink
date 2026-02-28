@@ -35,6 +35,8 @@ pub enum DocumentLine {
     Empty,
     /// A horizontal rule spanning the terminal width.
     Rule,
+    /// A line of colored ASCII art (no wrapping, no code-block background).
+    AsciiArt(Line<'static>),
     /// The first line of an image — triggers rendering at draw time.
     ImageStart { protocol_index: usize, height: u16 },
     /// Continuation lines for an image — reserves vertical space for scrolling.
@@ -111,6 +113,9 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, 
         RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth, theme),
         RenderedBlock::Table { headers, alignments, rows } => {
             flatten_table(headers, alignments, rows, width, theme)
+        }
+        RenderedBlock::AsciiImage { lines, .. } => {
+            lines.iter().map(|l| DocumentLine::AsciiArt(l.clone())).collect()
         }
         // Phase 4: images are rendered by the renderer via StatefulImage.
         // Layout emits ImageStart for the first row (renderer draws there) and
@@ -237,6 +242,11 @@ fn flatten_list(
                                 spans.extend(l.spans);
                                 lines.push(DocumentLine::Code(Line::from(spans)));
                             }
+                            DocumentLine::AsciiArt(l) => {
+                                let mut spans = vec![Span::raw(cont_prefix.clone())];
+                                spans.extend(l.spans);
+                                lines.push(DocumentLine::AsciiArt(Line::from(spans)));
+                            }
                             other => lines.push(other),
                         }
                     }
@@ -306,6 +316,11 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usi
                         Span::styled(prefix.to_string(), prefix_style),
                         Span::styled(rule_char.repeat(inner_width / rule_width), prefix_style),
                     ])));
+                }
+                DocumentLine::AsciiArt(l) => {
+                    let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
+                    spans.extend(l.spans);
+                    result.push(DocumentLine::AsciiArt(Line::from(spans)));
                 }
                 // Images inside block quotes: pass through with prefix.
                 // The renderer draws at absolute position within the allocated area.
