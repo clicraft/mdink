@@ -637,6 +637,66 @@
         }
     }
 
+    // ── Outline heading collection tests ─────────────────────────
+
+    #[test]
+    fn test_flatten_collects_h1_h2_h3() {
+        let blocks = vec![
+            RenderedBlock::Heading { level: 1, content: vec![plain_span("Title")] },
+            RenderedBlock::Heading { level: 2, content: vec![plain_span("Section")] },
+            RenderedBlock::Heading { level: 3, content: vec![plain_span("Sub")] },
+            RenderedBlock::Heading { level: 4, content: vec![plain_span("Deep")] },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.headings.len(), 3, "h4 should not be collected");
+        assert_eq!(doc.headings[0].level, 1);
+        assert_eq!(doc.headings[0].text, "Title");
+        assert_eq!(doc.headings[1].level, 2);
+        assert_eq!(doc.headings[1].text, "Section");
+        assert_eq!(doc.headings[2].level, 3);
+        assert_eq!(doc.headings[2].text, "Sub");
+    }
+
+    #[test]
+    fn test_flatten_no_headings() {
+        let blocks = vec![
+            RenderedBlock::Paragraph { content: vec![plain_span("Just text")] },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert!(doc.headings.is_empty());
+    }
+
+    #[test]
+    fn test_heading_plain_text_strips_formatting() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let italic = Style::default().add_modifier(Modifier::ITALIC);
+        let blocks = vec![
+            RenderedBlock::Heading {
+                level: 1,
+                content: vec![
+                    styled_span("Bold", bold),
+                    plain_span(" and "),
+                    styled_span("italic", italic),
+                ],
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.headings.len(), 1);
+        assert_eq!(doc.headings[0].text, "Bold and italic");
+    }
+
+    #[test]
+    fn test_heading_line_index_accounts_for_spacing() {
+        let blocks = vec![
+            RenderedBlock::Paragraph { content: vec![plain_span("First")] },
+            RenderedBlock::Heading { level: 1, content: vec![plain_span("Title")] },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.headings.len(), 1);
+        // Paragraph (1 line) + Empty (1 line) = heading starts at index 2.
+        assert_eq!(doc.headings[0].line_index, 2);
+    }
+
     #[test]
     fn test_layout_block_quote_inside_list_preserves_list_depth() {
         // A block quote inside a list item (depth=1) should thread list_depth

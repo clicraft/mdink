@@ -11,6 +11,12 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::layout::PreRenderedDocument;
 use crate::theme::MarkdownTheme;
 
+/// State for the outline panel when visible.
+pub struct OutlineState {
+    /// Index into `document.headings` for the currently selected heading.
+    pub selected: usize,
+}
+
 /// Application state for the TUI viewer.
 ///
 /// Holds the pre-rendered document, scroll position, viewport size,
@@ -29,6 +35,13 @@ pub struct App {
     pub filename: String,
     /// When true, the event loop should exit.
     pub quit: bool,
+    /// Outline panel state. `None` = hidden.
+    pub outline: Option<OutlineState>,
+    /// When true, main.rs should re-flatten the document (e.g. after outline toggle).
+    pub needs_reflatten: bool,
+    /// Heading index set by Enter in outline mode; main.rs resolves this
+    /// to a line index after any pending reflatten, then scrolls there.
+    pub pending_jump: Option<usize>,
 }
 
 impl App {
@@ -44,12 +57,41 @@ impl App {
             viewport_height: 0,
             filename,
             quit: false,
+            outline: None,
+            needs_reflatten: false,
+            pending_jump: None,
         }
     }
 
     /// Dispatches a key event to the appropriate scroll or quit action.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Outline-specific keys when outline is visible.
+        if self.outline.is_some() {
+            match key.code {
+                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.outline_select_next();
+                    return;
+                }
+                KeyCode::BackTab => {
+                    self.outline_select_prev();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.outline_jump();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.outline = None;
+                    self.needs_reflatten = true;
+                    return;
+                }
+                _ => {} // fall through to normal keys
+            }
+        }
+
         match key.code {
+            // Toggle outline
+            KeyCode::Char('o') => self.toggle_outline(),
             // Scroll down 1 line
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
             // Scroll up 1 line
@@ -75,6 +117,49 @@ impl App {
                 self.quit = true;
             }
             _ => {}
+        }
+    }
+
+    /// Toggles the outline panel on/off.
+    fn toggle_outline(&mut self) {
+        if self.outline.is_some() {
+            self.outline = None;
+        } else if !self.document.headings.is_empty() {
+            self.outline = Some(OutlineState { selected: 0 });
+        }
+        self.needs_reflatten = true;
+    }
+
+    /// Selects the next heading in the outline (wraps around).
+    fn outline_select_next(&mut self) {
+        if let Some(state) = &mut self.outline {
+            let count = self.document.headings.len();
+            if count > 0 {
+                state.selected = (state.selected + 1) % count;
+            }
+        }
+    }
+
+    /// Selects the previous heading in the outline (wraps around).
+    fn outline_select_prev(&mut self) {
+        if let Some(state) = &mut self.outline {
+            let count = self.document.headings.len();
+            if count > 0 {
+                state.selected = if state.selected == 0 { count - 1 } else { state.selected - 1 };
+            }
+        }
+    }
+
+    /// Sets pending_jump to the selected heading's index.
+    ///
+    /// The heading index is resolved to a line index in main.rs *after*
+    /// any pending reflatten, so the jump targets the correct line in
+    /// the final layout.
+    fn outline_jump(&mut self) {
+        if let Some(state) = &self.outline {
+            if state.selected < self.document.headings.len() {
+                self.pending_jump = Some(state.selected);
+            }
         }
     }
 

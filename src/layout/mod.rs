@@ -12,6 +12,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::parser::{ListItem, RenderedBlock, StyledSpan};
 use crate::theme::{self, MarkdownTheme};
 
+/// Metadata for a heading captured during layout for outline navigation.
+pub struct HeadingEntry {
+    /// Heading level (1–3).
+    pub level: u8,
+    /// Plain text content (formatting stripped).
+    pub text: String,
+    /// Index into `PreRenderedDocument::lines` where this heading starts.
+    pub line_index: usize,
+}
+
 /// A pre-rendered document ready for viewport slicing and rendering.
 ///
 /// Contains all lines laid out for a specific terminal width. Created
@@ -21,6 +31,8 @@ pub struct PreRenderedDocument {
     pub lines: Vec<DocumentLine>,
     /// Total number of lines (== `lines.len()`).
     pub total_height: usize,
+    /// Headings (h1–h3) collected during layout for outline navigation.
+    pub headings: Vec<HeadingEntry>,
 }
 
 /// A single line of the pre-rendered document.
@@ -48,6 +60,7 @@ pub enum DocumentLine {
 /// inserted between adjacent blocks for visual spacing.
 pub fn flatten(blocks: &[RenderedBlock], width: u16, theme: &MarkdownTheme) -> PreRenderedDocument {
     let mut lines: Vec<DocumentLine> = Vec::new();
+    let mut headings: Vec<HeadingEntry> = Vec::new();
     // Clamp to minimum width of 1 to avoid undefined textwrap behavior.
     let width = (width as usize).max(1);
 
@@ -56,11 +69,24 @@ pub fn flatten(blocks: &[RenderedBlock], width: u16, theme: &MarkdownTheme) -> P
         if i > 0 {
             lines.push(DocumentLine::Empty);
         }
+
+        // Collect heading metadata before layout discards the level.
+        if let RenderedBlock::Heading { level, content } = block {
+            if *level <= 3 {
+                let text: String = content.iter().map(|s| s.text.as_str()).collect();
+                headings.push(HeadingEntry {
+                    level: *level,
+                    text,
+                    line_index: lines.len(),
+                });
+            }
+        }
+
         lines.extend(flatten_single_block(block, width, 0, theme));
     }
 
     let total_height = lines.len();
-    PreRenderedDocument { lines, total_height }
+    PreRenderedDocument { lines, total_height, headings }
 }
 
 /// Flattens a single `RenderedBlock` into a `Vec<DocumentLine>`.

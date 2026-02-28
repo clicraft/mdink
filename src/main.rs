@@ -206,6 +206,20 @@ fn main() -> color_eyre::Result<()> {
     result
 }
 
+/// Computes the content width available for document layout.
+///
+/// When a side panel is active (outline open + wide terminal), the panel
+/// and its border consume space from the left. Otherwise, the full
+/// terminal width is available.
+fn compute_content_width(cols: u16, app: &App) -> u16 {
+    if app.outline.is_some() && cols >= renderer::OUTLINE_MIN_COLS {
+        let panel_w = app.theme.outline.width.min(cols / 3);
+        cols.saturating_sub(panel_w + 1 + renderer::OUTLINE_CONTENT_PAD)
+    } else {
+        cols
+    }
+}
+
 /// Runs the TUI event loop until the user quits or an error occurs.
 ///
 /// Separated from `main()` so that `ratatui::restore()` always runs
@@ -217,6 +231,8 @@ fn run_event_loop(
     blocks: &[RenderedBlock],
     image_manager: &mut ImageManager,
 ) -> color_eyre::Result<()> {
+    let mut cols = terminal.size()?.width;
+
     loop {
         // Update viewport height from current terminal size.
         app.viewport_height = terminal.size()?.height.saturating_sub(1) as usize;
@@ -231,10 +247,10 @@ fn run_event_loop(
             Event::Key(key) => {
                 app.handle_key(key);
             }
-            Event::Resize(cols, _rows) => {
-                // Re-flatten at the new width (blocks are unchanged).
-                app.document = layout::flatten(blocks, cols, &app.theme);
-                // Clamp scroll offset to the new max.
+            Event::Resize(new_cols, _rows) => {
+                cols = new_cols;
+                let w = compute_content_width(cols, app);
+                app.document = layout::flatten(blocks, w, &app.theme);
                 let max = app.max_scroll();
                 if app.scroll_offset > max {
                     app.scroll_offset = max;
@@ -242,6 +258,30 @@ fn run_event_loop(
             }
             // Ignore mouse, focus, and paste events.
             _ => {}
+        }
+
+        // Auto-close outline in dropdown mode when jumping.
+        if app.pending_jump.is_some() && cols < renderer::OUTLINE_MIN_COLS {
+            app.outline = None;
+            app.needs_reflatten = true;
+        }
+
+        // Re-flatten if outline was toggled (side panel changes content width).
+        if app.needs_reflatten {
+            app.needs_reflatten = false;
+            let w = compute_content_width(cols, app);
+            app.document = layout::flatten(blocks, w, &app.theme);
+            let max = app.max_scroll();
+            if app.scroll_offset > max {
+                app.scroll_offset = max;
+            }
+        }
+
+        // Resolve pending heading jump against the (possibly re-flattened) document.
+        if let Some(heading_idx) = app.pending_jump.take() {
+            if let Some(entry) = app.document.headings.get(heading_idx) {
+                app.scroll_offset = entry.line_index.min(app.max_scroll());
+            }
         }
 
         if app.quit {

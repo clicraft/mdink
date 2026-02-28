@@ -322,6 +322,19 @@ fn test_loaded_dark_matches_default_theme() {
 
     // Syntect theme.
     assert_eq!(loaded.syntect_theme, default.syntect_theme, "syntect_theme");
+
+    // Outline panel.
+    for level in [1u8, 2, 3, 4] {
+        assert_eq!(
+            outline_entry_style(&loaded.outline, level),
+            outline_entry_style(&default.outline, level),
+            "outline entry style for level {level}",
+        );
+    }
+    assert_eq!(outline_selected_style(&loaded.outline), outline_selected_style(&default.outline), "outline selected");
+    assert_eq!(outline_border_style(&loaded.outline), outline_border_style(&default.outline), "outline border");
+    assert_eq!(outline_bg_style(&loaded.outline), outline_bg_style(&default.outline), "outline bg");
+    assert_eq!(loaded.outline.width, default.outline.width, "outline width");
 }
 
 // ── Default theme regression ─────────────────────────────────────────────────
@@ -464,6 +477,20 @@ fn test_sanitize_empty_bullet_vec() {
 }
 
 #[test]
+fn test_sanitize_outline_width_clamped() {
+    let json = r#"{"name": "narrow", "outline": {"width": 5}}"#;
+    let mut theme: MarkdownTheme = serde_json::from_str(json).expect("parse");
+    assert_eq!(theme.outline.width, 5);
+    theme.sanitize();
+    assert_eq!(theme.outline.width, 15, "outline width should be clamped to minimum 15");
+
+    let json2 = r#"{"name": "wide", "outline": {"width": 100}}"#;
+    let mut theme2: MarkdownTheme = serde_json::from_str(json2).expect("parse");
+    theme2.sanitize();
+    assert_eq!(theme2.outline.width, 60, "outline width should be clamped to maximum 60");
+}
+
+#[test]
 fn test_sanitize_zero_indent_size() {
     let json = r#"{"name": "flat", "list": {"indent_size": 0}}"#;
     let mut theme: MarkdownTheme = serde_json::from_str(json).expect("parse");
@@ -516,6 +543,17 @@ fn test_theme_roundtrip() {
     assert_eq!(roundtripped.thematic_break.char_, original.thematic_break.char_);
     assert_eq!(roundtripped.block_quote.prefix, original.block_quote.prefix);
     assert_eq!(roundtripped.list.bullet, original.list.bullet);
+
+    // Outline panel.
+    assert_eq!(roundtripped.outline.fg, original.outline.fg);
+    assert_eq!(roundtripped.outline.bg, original.outline.bg);
+    assert_eq!(roundtripped.outline.selected_fg, original.outline.selected_fg);
+    assert_eq!(roundtripped.outline.selected_bg, original.outline.selected_bg);
+    assert_eq!(roundtripped.outline.border_fg, original.outline.border_fg);
+    assert_eq!(roundtripped.outline.h1_fg, original.outline.h1_fg);
+    assert_eq!(roundtripped.outline.h2_fg, original.outline.h2_fg);
+    assert_eq!(roundtripped.outline.h3_fg, original.outline.h3_fg);
+    assert_eq!(roundtripped.outline.width, original.outline.width);
 }
 
 // ── strip_colors ─────────────────────────────────────────────────────────────
@@ -549,6 +587,15 @@ fn test_strip_colors_removes_all_colors() {
     assert!(theme.list.number_fg.is_none());
     assert!(theme.list.task_checked_fg.is_none());
     assert!(theme.list.task_unchecked_fg.is_none());
+    // Outline panel
+    assert!(theme.outline.fg.is_none());
+    assert!(theme.outline.bg.is_none());
+    assert!(theme.outline.selected_fg.is_none());
+    assert!(theme.outline.selected_bg.is_none());
+    assert!(theme.outline.border_fg.is_none());
+    assert!(theme.outline.h1_fg.is_none());
+    assert!(theme.outline.h2_fg.is_none());
+    assert!(theme.outline.h3_fg.is_none());
     // Status bar
     assert!(theme.status_bar.fg.is_none());
     assert!(theme.status_bar.bg.is_none());
@@ -588,6 +635,8 @@ fn test_strip_colors_preserves_modifiers() {
     assert_eq!(theme.thematic_break.char_, "─");
     assert_eq!(theme.block_quote.prefix, "│ ");
     assert_eq!(theme.list.bullet, vec!["•", "◦", "▪"]);
+    // Outline width preserved.
+    assert_eq!(theme.outline.width, 30);
     // Syntect theme cleared (signals no highlighting).
     assert!(theme.syntect_theme.is_empty());
 }

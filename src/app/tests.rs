@@ -1,11 +1,12 @@
     use super::*;
-    use crate::layout::{DocumentLine, PreRenderedDocument};
+    use crate::layout::{DocumentLine, HeadingEntry, PreRenderedDocument};
 
     fn make_doc(line_count: usize) -> PreRenderedDocument {
         let lines = (0..line_count).map(|_| DocumentLine::Empty).collect();
         PreRenderedDocument {
             lines,
             total_height: line_count,
+            headings: Vec::new(),
         }
     }
 
@@ -146,4 +147,150 @@
         let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty());
         app.handle_key(key);
         assert_eq!(app.scroll_offset, 4);
+    }
+
+    // ── Outline tests ────────────────────────────────────────────────
+
+    fn make_doc_with_headings(line_count: usize, headings: Vec<HeadingEntry>) -> PreRenderedDocument {
+        let lines = (0..line_count).map(|_| DocumentLine::Empty).collect();
+        PreRenderedDocument {
+            lines,
+            total_height: line_count,
+            headings,
+        }
+    }
+
+    fn make_app_with_headings(doc_lines: usize, viewport: usize, headings: Vec<HeadingEntry>) -> App {
+        let mut app = App::new(
+            make_doc_with_headings(doc_lines, headings),
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+        );
+        app.viewport_height = viewport;
+        app
+    }
+
+    fn sample_headings() -> Vec<HeadingEntry> {
+        vec![
+            HeadingEntry { level: 1, text: "Intro".to_string(), line_index: 0 },
+            HeadingEntry { level: 2, text: "Details".to_string(), line_index: 5 },
+            HeadingEntry { level: 3, text: "Sub".to_string(), line_index: 10 },
+        ]
+    }
+
+    #[test]
+    fn test_outline_toggle() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        assert!(app.outline.is_none());
+
+        // Toggle on.
+        let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty());
+        app.handle_key(key);
+        assert!(app.outline.is_some());
+        assert!(app.needs_reflatten);
+
+        // Reset flag, toggle off.
+        app.needs_reflatten = false;
+        app.handle_key(key);
+        assert!(app.outline.is_none());
+        assert!(app.needs_reflatten);
+    }
+
+    #[test]
+    fn test_outline_empty_headings_no_toggle() {
+        let mut app = make_app(20, 5);
+        let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty());
+        app.handle_key(key);
+        // Should remain None when there are no headings.
+        assert!(app.outline.is_none());
+    }
+
+    #[test]
+    fn test_outline_tab_nav() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        // Open outline.
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 0);
+
+        // Tab forward.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 2);
+
+        // Tab wraps to 0.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn test_outline_shift_tab_nav() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+
+        // Shift+Tab wraps to last.
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn test_outline_jump() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+
+        // Navigate to second heading and jump.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        // pending_jump should be set to the heading index (1), not the line index.
+        // main.rs resolves this to document.headings[1].line_index after reflatten.
+        assert_eq!(app.pending_jump, Some(1));
+    }
+
+    #[test]
+    fn test_outline_esc_closes() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert!(app.outline.is_some());
+
+        // Esc closes outline (does not quit).
+        app.needs_reflatten = false;
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.outline.is_none());
+        assert!(app.needs_reflatten);
+        assert!(!app.quit, "Esc with outline open should not quit");
+    }
+
+    #[test]
+    fn test_outline_single_heading_nav_wraps_to_zero() {
+        let headings = vec![
+            HeadingEntry { level: 1, text: "Only".to_string(), line_index: 0 },
+        ];
+        let mut app = make_app_with_headings(20, 5, headings);
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 0);
+
+        // Tab wraps back to 0.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 0);
+
+        // Shift+Tab also wraps back to 0.
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.outline.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn test_outline_jk_still_scroll() {
+        let mut app = make_app_with_headings(20, 5, sample_headings());
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+
+        // j/k should still scroll the document.
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 0);
     }

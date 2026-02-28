@@ -29,6 +29,7 @@ pub struct MarkdownTheme {
     pub strikethrough: InlineStyle,
     pub link: InlineStyle,
     pub image_alt: InlineStyle,
+    pub outline: OutlinePanelStyle,
     pub status_bar: StatusBarStyle,
     pub syntect_theme: String,
 }
@@ -168,6 +169,37 @@ impl Default for ListStyle {
     }
 }
 
+/// Outline panel style.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct OutlinePanelStyle {
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+    pub selected_fg: Option<String>,
+    pub selected_bg: Option<String>,
+    pub border_fg: Option<String>,
+    pub h1_fg: Option<String>,
+    pub h2_fg: Option<String>,
+    pub h3_fg: Option<String>,
+    pub width: u16,
+}
+
+impl Default for OutlinePanelStyle {
+    fn default() -> Self {
+        Self {
+            fg: Some("white".to_string()),
+            bg: None,
+            selected_fg: Some("black".to_string()),
+            selected_bg: Some("white".to_string()),
+            border_fg: Some("dark_gray".to_string()),
+            h1_fg: Some("light_cyan".to_string()),
+            h2_fg: Some("green".to_string()),
+            h3_fg: Some("yellow".to_string()),
+            width: 30,
+        }
+    }
+}
+
 /// Status bar style.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -224,6 +256,7 @@ impl Default for MarkdownTheme {
             strikethrough: InlineStyle { strikethrough: true, ..Default::default() },
             link: InlineStyle { italic: true, ..Default::default() },
             image_alt: InlineStyle { dim: true, ..Default::default() },
+            outline: OutlinePanelStyle::default(),
             status_bar: StatusBarStyle::default(),
             syntect_theme: "base16-ocean.dark".to_string(),
         }
@@ -272,6 +305,9 @@ impl MarkdownTheme {
         if self.list.indent_size == 0 {
             self.list.indent_size = 2;
         }
+
+        // Outline panel width: clamp to 15..=60.
+        self.outline.width = self.outline.width.clamp(15, 60);
     }
 
     /// Removes all color fields while preserving structural modifiers and text.
@@ -310,6 +346,16 @@ impl MarkdownTheme {
         self.list.number_fg = None;
         self.list.task_checked_fg = None;
         self.list.task_unchecked_fg = None;
+
+        // Outline panel
+        self.outline.fg = None;
+        self.outline.bg = None;
+        self.outline.selected_fg = None;
+        self.outline.selected_bg = None;
+        self.outline.border_fg = None;
+        self.outline.h1_fg = None;
+        self.outline.h2_fg = None;
+        self.outline.h3_fg = None;
 
         // Status bar
         self.status_bar.fg = None;
@@ -504,6 +550,40 @@ pub fn list_task_checked_style(ls: &ListStyle) -> Style {
 /// Style for unchecked task markers.
 pub fn list_task_unchecked_style(ls: &ListStyle) -> Style {
     apply_color(Style::default(), &ls.task_unchecked_fg, Style::fg)
+}
+
+/// Style for an outline panel heading entry (normal, unselected).
+pub fn outline_entry_style(o: &OutlinePanelStyle, level: u8) -> Style {
+    let level_fg = match level {
+        1 => &o.h1_fg,
+        2 => &o.h2_fg,
+        3 => &o.h3_fg,
+        _ => &o.fg,
+    };
+    // Fall back to the general fg if no per-level color is set.
+    let fg = if level_fg.is_some() { level_fg } else { &o.fg };
+    let mut style = Style::default();
+    style = apply_color(style, fg, Style::fg);
+    style = apply_color(style, &o.bg, Style::bg);
+    style
+}
+
+/// Style for the selected outline panel heading entry.
+pub fn outline_selected_style(o: &OutlinePanelStyle) -> Style {
+    let mut style = Style::default();
+    style = apply_color(style, &o.selected_fg, Style::fg);
+    style = apply_color(style, &o.selected_bg, Style::bg);
+    style
+}
+
+/// Style for the outline panel border.
+pub fn outline_border_style(o: &OutlinePanelStyle) -> Style {
+    apply_color(Style::default(), &o.border_fg, Style::fg)
+}
+
+/// Background style for the outline panel area.
+pub fn outline_bg_style(o: &OutlinePanelStyle) -> Style {
+    apply_color(Style::default(), &o.bg, Style::bg)
 }
 
 /// Style for the status bar.

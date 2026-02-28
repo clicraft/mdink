@@ -44,6 +44,16 @@
     "header_bold": true,
     "border_dim": true
   },
+  "outline": {
+    "fg": "white",
+    "selected_fg": "black",
+    "selected_bg": "white",
+    "border_fg": "dark_gray",
+    "h1_fg": "light_cyan",
+    "h2_fg": "green",
+    "h3_fg": "yellow",
+    "width": 30
+  },
   "status_bar": {
     "fg": "black",
     "bg": "white",
