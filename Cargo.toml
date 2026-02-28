@@ -10,7 +10,7 @@ repository = "https://github.com/mdink-rs/mdink"
 readme = "README.md"
 keywords = ["markdown", "terminal", "tui", "renderer"]
 categories = ["command-line-utilities"]
-exclude = ["xtask/", "plans/", "testdata/", "packaging/", "assets/", ".github/"]
+exclude = ["xtask/", "plans/", "testdata/", "packaging/", "assets/completions/", "assets/mdink-logo.png", "assets/mdink.1.gz", "assets/colors.png", ".github/"]
 
 [workspace]
 members = ["xtask"]
