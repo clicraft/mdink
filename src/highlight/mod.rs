@@ -49,6 +49,16 @@ impl Highlighter {
         language: &str,
         theme_name: &str,
     ) -> Vec<Line<'static>> {
+        // Empty theme name signals NO_COLOR mode: skip highlighting entirely
+        // and return unstyled plain text. This keeps the leaf module boundary
+        // clean — the caller controls highlighting via the theme name string.
+        if theme_name.is_empty() {
+            return code
+                .lines()
+                .map(|l| Line::from(Span::raw(l.to_string())))
+                .collect();
+        }
+
         // Guard against unbounded memory/CPU: Oniguruma (syntect's regex engine) can
         // exhaust memory on large inputs, surfacing as a panic rather than an Err.
         // Blocks exceeding the limit are rendered as plain unstyled text instead.

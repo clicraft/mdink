@@ -6,6 +6,7 @@
 
 mod app;
 mod cli;
+mod config;
 mod highlight;
 mod images;
 mod layout;
@@ -14,7 +15,9 @@ mod renderer;
 mod theme;
 
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
@@ -33,6 +36,10 @@ use crate::parser::RenderedBlock;
 /// display on some terminals and multiplexers.
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// BSD-style exit codes for pre-terminal-init errors.
+const EX_DATAERR: i32 = 65; // file too large
+const EX_NOINPUT: i32 = 66; // file not found / unreadable
+
 fn main() -> color_eyre::Result<()> {
     // Install color_eyre error/panic hooks for pretty backtraces.
     color_eyre::install()?;
@@ -50,6 +57,9 @@ fn main() -> color_eyre::Result<()> {
     // Parse CLI arguments.
     let cli = Cli::parse();
 
+    // Load config file (fail-safe: defaults on any error).
+    let config = config::load_config();
+
     // Handle --list-themes early: print to stdout before terminal init, then exit.
     if cli.list_themes {
         println!("Built-in themes:");
@@ -61,32 +71,97 @@ fn main() -> color_eyre::Result<()> {
         return Ok(());
     }
 
-    // Resolve theme: --style flag > MDINK_STYLE env var > default theme.
+    // Resolve theme: --style flag > MDINK_STYLE env var > config.style > default.
     let theme_name = cli
         .style
         .clone()
-        .or_else(|| std::env::var("MDINK_STYLE").ok());
-    let theme = match theme_name {
+        .or_else(|| std::env::var("MDINK_STYLE").ok())
+        .or(config.style);
+    let mut theme = match theme_name {
         Some(name) => theme::load_theme(&name)?,
         None => theme::default_theme(),
     };
 
-    // Guard against OOM: reject files that exceed a reasonable size threshold.
-    // The check happens before ratatui::init() so the error prints to the normal
-    // terminal instead of a raw alternate screen.
-    const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
-    let file_size = fs::metadata(&cli.file)?.len();
-    if file_size > MAX_FILE_BYTES {
-        return Err(color_eyre::eyre::eyre!(
-            "{}: file too large ({} bytes; limit is {} bytes)",
-            cli.file,
-            file_size,
-            MAX_FILE_BYTES
-        ));
+    // Handle --dump-theme: print the resolved theme as-is, before NO_COLOR
+    // stripping. This ensures the exported theme retains all color definitions
+    // even when NO_COLOR is set in the environment.
+    if cli.dump_theme {
+        println!("{}", serde_json::to_string_pretty(&theme)?);
+        return Ok(());
     }
 
-    // Read the markdown source file.
-    let source = fs::read_to_string(&cli.file)?;
+    // NO_COLOR: strip colors if any source requests it.
+    let no_color = cli.no_color
+        || std::env::var_os("NO_COLOR").is_some()
+        || config.no_color.unwrap_or(false);
+    if no_color {
+        theme.strip_colors();
+    }
+
+    // From here on, `file` is required (enforced by clap's required_unless_present_any).
+    let file = cli.file.as_deref().expect("file argument is required here");
+
+    // Read source from stdin or file, with appropriate guards.
+    const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+    let (source, display_name, base_path) = if file == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_string(&mut buf)?;
+        if buf.len() as u64 > MAX_FILE_BYTES {
+            eprintln!("<stdin>: input too large (limit is {MAX_FILE_BYTES} bytes)");
+            process::exit(EX_DATAERR);
+        }
+        (buf, "<stdin>".to_string(), PathBuf::from("."))
+    } else {
+        // Guard against OOM: reject files that exceed a reasonable size threshold.
+        // The check happens before ratatui::init() so the error prints to the normal
+        // terminal instead of a raw alternate screen.
+        let metadata = match fs::metadata(file) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                process::exit(EX_NOINPUT);
+            }
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            eprintln!(
+                "{file}: file too large ({} bytes; limit is {MAX_FILE_BYTES} bytes)",
+                metadata.len()
+            );
+            process::exit(EX_DATAERR);
+        }
+
+        let content = match fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                eprintln!("{file}: not valid UTF-8 text");
+                process::exit(EX_DATAERR);
+            }
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                process::exit(EX_NOINPUT);
+            }
+        };
+
+        // Sanitize filename for display: strip control characters and ANSI escape
+        // sequences so a crafted filename cannot inject terminal escape codes into
+        // the status bar output.
+        let safe_filename = file
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>();
+
+        let bp = Path::new(file)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+
+        (content, safe_filename, bp)
+    };
+
+    // Resolve no_images from CLI flag or config.
+    let no_images = cli.no_images || config.no_images.unwrap_or(false);
 
     // Load syntax highlighting resources (expensive, done once).
     let highlighter = highlight::Highlighter::new();
@@ -97,7 +172,7 @@ fn main() -> color_eyre::Result<()> {
     // Query terminal for graphics protocol support (Sixel/Kitty/iTerm2/halfblocks).
     // from_query_stdio() requires raw mode, so we enable it briefly and disable
     // before ratatui::init() takes over. Failure is non-fatal: images fall back to alt text.
-    let picker = if cli.no_images {
+    let picker = if no_images {
         None
     } else {
         ratatui::crossterm::terminal::enable_raw_mode().ok();
@@ -106,10 +181,6 @@ fn main() -> color_eyre::Result<()> {
         p
     };
 
-    let base_path = Path::new(&cli.file)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
     let mut image_manager = ImageManager::new(base_path, picker, cols);
 
     // Parse markdown into IR blocks (done once — blocks don't depend on width).
@@ -118,17 +189,8 @@ fn main() -> color_eyre::Result<()> {
     // Flatten blocks into document lines at the current width.
     let document = layout::flatten(&blocks, cols, &theme);
 
-    // Sanitize filename for display: strip control characters and ANSI escape
-    // sequences so a crafted filename cannot inject terminal escape codes into
-    // the status bar output.
-    let safe_filename = cli
-        .file
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>();
-
     // Create the application state.
-    let mut app = App::new(document, safe_filename, theme);
+    let mut app = App::new(document, display_name, theme);
 
     // Initialize the terminal (enters raw mode + alternate screen).
     // TERMINAL_ACTIVE must be set immediately after so the panic hook is correct.

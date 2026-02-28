@@ -7,12 +7,12 @@
 use std::fs;
 
 use ratatui::style::{Color, Modifier, Style};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Theme structs ────────────────────────────────────────────────────────────
 
 /// Top-level markdown theme. All fields have defaults so partial JSON works.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct MarkdownTheme {
     pub name: String,
@@ -34,14 +34,14 @@ pub struct MarkdownTheme {
 }
 
 /// Document-level style (background).
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct DocumentStyle {
     pub bg: Option<String>,
 }
 
 /// Per-heading-level style.
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct HeadingStyle {
     pub fg: Option<String>,
@@ -53,7 +53,7 @@ pub struct HeadingStyle {
 }
 
 /// Code block chrome style.
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct CodeBlockStyle {
     pub bg: Option<String>,
@@ -63,7 +63,7 @@ pub struct CodeBlockStyle {
 }
 
 /// Block quote style.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct BlockQuoteStyle {
     pub fg: Option<String>,
@@ -86,7 +86,7 @@ impl Default for BlockQuoteStyle {
 }
 
 /// Reusable inline style (emphasis, strong, code_inline, link, etc.).
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct InlineStyle {
     pub fg: Option<String>,
@@ -99,7 +99,7 @@ pub struct InlineStyle {
 }
 
 /// Table style.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct TableStyle {
     pub header_fg: Option<String>,
@@ -120,7 +120,7 @@ impl Default for TableStyle {
 }
 
 /// Thematic break (horizontal rule) style.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct ThematicBreakStyle {
     pub fg: Option<String>,
@@ -140,7 +140,7 @@ impl Default for ThematicBreakStyle {
 }
 
 /// List style.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct ListStyle {
     pub bullet: Vec<String>,
@@ -169,7 +169,7 @@ impl Default for ListStyle {
 }
 
 /// Status bar style.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct StatusBarStyle {
     pub fg: Option<String>,
@@ -272,6 +272,64 @@ impl MarkdownTheme {
         if self.list.indent_size == 0 {
             self.list.indent_size = 2;
         }
+    }
+
+    /// Removes all color fields while preserving structural modifiers and text.
+    ///
+    /// Called when `NO_COLOR` is active. Modifiers like bold, italic, underline,
+    /// dim, and strikethrough are kept — they provide structure without color.
+    /// Text fields (prefix, bullet, char_) are also preserved.
+    pub fn strip_colors(&mut self) {
+        // Document
+        self.document.bg = None;
+
+        // Headings
+        for h in &mut self.heading {
+            h.fg = None;
+            h.bg = None;
+        }
+
+        // Code block
+        self.code_block.bg = None;
+        self.code_block.label_fg = None;
+        self.code_block.label_bg = None;
+
+        // Block quote
+        self.block_quote.fg = None;
+        self.block_quote.border_fg = None;
+
+        // Table
+        self.table.header_fg = None;
+        self.table.border_fg = None;
+
+        // Thematic break
+        self.thematic_break.fg = None;
+
+        // List
+        self.list.bullet_fg = None;
+        self.list.number_fg = None;
+        self.list.task_checked_fg = None;
+        self.list.task_unchecked_fg = None;
+
+        // Status bar
+        self.status_bar.fg = None;
+        self.status_bar.bg = None;
+
+        // Syntect code highlighting: empty string signals no highlighting
+        // to highlight.rs, which returns plain unstyled text.
+        self.syntect_theme = String::new();
+
+        // Inline styles
+        fn strip_inline(s: &mut InlineStyle) {
+            s.fg = None;
+            s.bg = None;
+        }
+        strip_inline(&mut self.code_inline);
+        strip_inline(&mut self.emphasis);
+        strip_inline(&mut self.strong);
+        strip_inline(&mut self.strikethrough);
+        strip_inline(&mut self.link);
+        strip_inline(&mut self.image_alt);
     }
 }
 

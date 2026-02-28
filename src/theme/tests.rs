@@ -492,3 +492,102 @@ fn test_load_theme_calls_sanitize() {
     let theme = load_theme("dark").expect("dark");
     assert_eq!(theme.heading.len(), 6);
 }
+
+// ── Serialize / roundtrip ────────────────────────────────────────────────────
+
+#[test]
+fn test_theme_roundtrip() {
+    let original = default_theme();
+    let json = serde_json::to_string_pretty(&original).expect("serialize");
+    let roundtripped: MarkdownTheme = serde_json::from_str(&json).expect("deserialize");
+
+    // Key fields must survive the roundtrip.
+    assert_eq!(roundtripped.name, original.name);
+    assert_eq!(roundtripped.syntect_theme, original.syntect_theme);
+    assert_eq!(roundtripped.heading.len(), original.heading.len());
+    for i in 0..6 {
+        assert_eq!(heading_style(&roundtripped.heading[i]), heading_style(&original.heading[i]),
+            "heading[{i}] differs after roundtrip");
+    }
+    assert_eq!(inline_style(&roundtripped.code_inline), inline_style(&original.code_inline));
+    assert_eq!(inline_style(&roundtripped.emphasis), inline_style(&original.emphasis));
+    assert_eq!(inline_style(&roundtripped.strong), inline_style(&original.strong));
+    assert_eq!(status_bar_style(&roundtripped.status_bar), status_bar_style(&original.status_bar));
+    assert_eq!(roundtripped.thematic_break.char_, original.thematic_break.char_);
+    assert_eq!(roundtripped.block_quote.prefix, original.block_quote.prefix);
+    assert_eq!(roundtripped.list.bullet, original.list.bullet);
+}
+
+// ── strip_colors ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_strip_colors_removes_all_colors() {
+    let mut theme = load_theme("dracula").expect("dracula");
+    theme.strip_colors();
+
+    // Document
+    assert!(theme.document.bg.is_none());
+    // Headings
+    for h in &theme.heading {
+        assert!(h.fg.is_none(), "heading fg should be None");
+        assert!(h.bg.is_none(), "heading bg should be None");
+    }
+    // Code block
+    assert!(theme.code_block.bg.is_none());
+    assert!(theme.code_block.label_fg.is_none());
+    assert!(theme.code_block.label_bg.is_none());
+    // Block quote
+    assert!(theme.block_quote.fg.is_none());
+    assert!(theme.block_quote.border_fg.is_none());
+    // Table
+    assert!(theme.table.header_fg.is_none());
+    assert!(theme.table.border_fg.is_none());
+    // Thematic break
+    assert!(theme.thematic_break.fg.is_none());
+    // List
+    assert!(theme.list.bullet_fg.is_none());
+    assert!(theme.list.number_fg.is_none());
+    assert!(theme.list.task_checked_fg.is_none());
+    assert!(theme.list.task_unchecked_fg.is_none());
+    // Status bar
+    assert!(theme.status_bar.fg.is_none());
+    assert!(theme.status_bar.bg.is_none());
+    // Inlines
+    assert!(theme.code_inline.fg.is_none());
+    assert!(theme.code_inline.bg.is_none());
+    assert!(theme.emphasis.fg.is_none());
+    assert!(theme.strong.fg.is_none());
+    assert!(theme.link.fg.is_none());
+    assert!(theme.image_alt.fg.is_none());
+    // Syntect theme
+    assert!(theme.syntect_theme.is_empty());
+}
+
+#[test]
+fn test_strip_colors_preserves_modifiers() {
+    let mut theme = default_theme();
+    theme.strip_colors();
+
+    // Bold headings stay bold.
+    assert!(theme.heading[0].bold);
+    // Emphasis stays italic.
+    assert!(theme.emphasis.italic);
+    // Strong stays bold.
+    assert!(theme.strong.bold);
+    // Strikethrough stays crossed-out.
+    assert!(theme.strikethrough.strikethrough);
+    // Code inline keeps bold+italic.
+    assert!(theme.code_inline.bold);
+    assert!(theme.code_inline.italic);
+    // Block quote keeps structural modifiers.
+    assert!(theme.block_quote.italic);
+    assert!(theme.block_quote.dim);
+    // Status bar keeps bold.
+    assert!(theme.status_bar.bold);
+    // Text fields preserved.
+    assert_eq!(theme.thematic_break.char_, "─");
+    assert_eq!(theme.block_quote.prefix, "│ ");
+    assert_eq!(theme.list.bullet, vec!["•", "◦", "▪"]);
+    // Syntect theme cleared (signals no highlighting).
+    assert!(theme.syntect_theme.is_empty());
+}

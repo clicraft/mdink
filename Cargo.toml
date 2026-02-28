@@ -10,6 +10,10 @@ repository = "https://github.com/mdink-rs/mdink"
 readme = "README.md"
 keywords = ["markdown", "terminal", "tui", "renderer"]
 categories = ["command-line-utilities"]
+exclude = ["xtask/", "plans/", "testdata/", "packaging/", "assets/", ".github/"]
+
+[workspace]
+members = ["xtask"]
 
 [dependencies]
 # Phase 1
@@ -58,7 +62,10 @@ section = "utils"
 priority = "optional"
 depends = "$auto"
 assets = [
-    ["target/release/mdink", "usr/bin/",                      "755"],
-    ["README.md",            "usr/share/doc/mdink/README",    "644"],
-    # Phase 7 will add: man page, bash/fish/zsh completions
+    ["target/release/mdink", "usr/bin/",                                        "755"],
+    ["README.md",            "usr/share/doc/mdink/README",                      "644"],
+    ["assets/mdink.1.gz",    "usr/share/man/man1/",                             "644"],
+    ["assets/completions/mdink.bash", "usr/share/bash-completion/completions/mdink", "644"],
+    ["assets/completions/_mdink",     "usr/share/zsh/site-functions/",           "644"],
+    ["assets/completions/mdink.fish", "usr/share/fish/vendor_completions.d/",    "644"],
 ]

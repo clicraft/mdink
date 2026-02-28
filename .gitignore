@@ -8,6 +8,10 @@
 .vscode/
 .idea/
 
+# Generated assets (cargo xtask dist-assets)
+assets/mdink.1.gz
+assets/completions/
+
 # OS files
 .DS_Store
 Thumbs.db
