@@ -930,6 +930,102 @@
     }
 
     #[test]
+    fn test_parser_force_ascii_midsize_pngs() {
+        // Exercise three 256×256 PNGs (both RGB and RGBA) through the full
+        // parser → AsciiImage path with force_ascii=true.
+        let cases = [
+            ("![GitLab](gitlab-logo.png)", "GitLab"),
+            ("![Facebook](facebook-logo.png)", "Facebook"),
+            ("![Maven](maven-logo.png)", "Maven"),
+        ];
+        for (md, expected_alt) in cases {
+            let mut im = crate::images::ImageManager::new(
+                std::path::PathBuf::from("testdata"),
+                None,
+                80,
+                false,
+                true, // force ASCII art
+            );
+            let theme = crate::theme::default_theme();
+            let blocks = super::parse(md, h(), &mut im, &theme);
+            let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+            assert!(ascii.is_some(), "{expected_alt}: should produce AsciiImage");
+            if let Some(RenderedBlock::AsciiImage { lines, alt_text }) = ascii {
+                assert!(!lines.is_empty(), "{expected_alt}: should have lines");
+                assert_eq!(alt_text, expected_alt);
+                // 256x256 at 80 cols → 80 spans per line (scaled to terminal width).
+                assert_eq!(
+                    lines[0].spans.len(), 80,
+                    "{expected_alt}: each line should have 80 spans"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parser_midsize_png_ascii_art_has_variety() {
+        // Verify the ASCII art for a real logo uses multiple density characters
+        // (not just a solid block of spaces or '#').
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            60,
+            false,
+            true,
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![Facebook](facebook-logo.png)", h(), &mut im, &theme);
+        if let Some(RenderedBlock::AsciiImage { lines, .. }) =
+            blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }))
+        {
+            let chars: std::collections::HashSet<char> = lines
+                .iter()
+                .flat_map(|l| l.spans.iter().filter_map(|s| s.content.chars().next()))
+                .collect();
+            assert!(
+                chars.len() >= 3,
+                "256x256 logo should use ≥3 density chars, got {}: {:?}",
+                chars.len(),
+                chars
+            );
+        } else {
+            panic!("expected AsciiImage block");
+        }
+    }
+
+    #[test]
+    fn test_ascii_images_testdata_full_document() {
+        // Parse the full ascii-images-test.md through the pipeline with force_ascii.
+        let source = include_str!("../../testdata/ascii-images-test.md");
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false,
+            true,
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse(source, h(), &mut im, &theme);
+
+        let ascii_count = blocks.iter().filter(|b| matches!(b, RenderedBlock::AsciiImage { .. })).count();
+        assert!(
+            ascii_count >= 5,
+            "ascii-images-test.md has 6 images; at least 5 should produce AsciiImage, got {ascii_count}"
+        );
+
+        // Also verify non-image blocks survived.
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Heading { .. })));
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::Paragraph { .. })));
+        assert!(blocks.iter().any(|b| matches!(b, RenderedBlock::BlockQuote { .. })));
+
+        // Run through layout at various widths to catch panics.
+        for width in [40u16, 80, 120] {
+            let doc = crate::layout::flatten(&blocks, width, &theme);
+            assert!(doc.total_height > 0, "layout at width={width} should produce lines");
+        }
+    }
+
+    #[test]
     fn test_parser_two_paragraphs_no_content_bleeding() {
         // Adjacent paragraphs must not bleed content into each other.
         // Regression for end_paragraph else-arm leaving current_spans dirty.
