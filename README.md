@@ -10,6 +10,8 @@ A terminal markdown renderer with syntax highlighting and inline images. Inspire
 mdink README.md
 ```
 
+**[Full documentation →](https://github.com/mdink-rs/mdink/wiki)**
+
 ## Features
 
 - **Headings** (h1–h6) with distinct colors and font-slot modifiers
@@ -32,7 +34,7 @@ cargo install --path .
 
 ### Pre-built binaries
 
-Pre-built binaries and a Debian package are planned for the first release. See [releases](https://github.com/mdink-rs/mdink/releases).
+Pre-built binaries (Linux x86\_64/aarch64, macOS x86\_64/aarch64, Windows x86\_64) and a Debian `.deb` package are available on the [releases page](https://github.com/mdink-rs/mdink/releases). See the [Installation wiki page](https://github.com/mdink-rs/mdink/wiki/Installation) for full instructions including shell completions and the man page.
 
 ## Usage
 
