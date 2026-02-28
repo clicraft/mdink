@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-02-28
+
 ### Added
 - Config file support (`~/.config/mdink/config.json`) for persistent settings
 - Stdin support (`mdink -` or piping to mdink)
