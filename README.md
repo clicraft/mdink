@@ -29,10 +29,10 @@ mdink README.md
 
 ## Installation
 
-### From source
+### From crates.io
 
 ```bash
-cargo install --path .
+cargo install mdink
 ```
 
 ### Pre-built binaries
