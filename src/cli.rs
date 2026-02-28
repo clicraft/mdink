@@ -29,6 +29,7 @@ KEYBINDINGS:
   u / Page Up                Page up
   g / Home                   Go to top
   G / End                    Go to bottom
+  r                          Refresh / re-render
   q / Esc                    Quit
 
 THEMES:
@@ -42,7 +43,7 @@ ENVIRONMENT VARIABLES:
 
 CONFIG FILE:
   ~/.config/mdink/config.json
-  {\"style\": \"dracula\", \"no_images\": false, \"no_color\": false}
+  {\"style\": \"dracula\", \"no_images\": false, \"ascii_images\": false, \"no_color\": false}
   CLI flags and env vars take precedence over config values."
 )]
 pub struct Cli {
@@ -53,6 +54,10 @@ pub struct Cli {
     /// Disable image rendering (show alt text instead).
     #[arg(long)]
     pub no_images: bool,
+
+    /// Force ASCII art for images (useful when the terminal falsely claims graphics support).
+    #[arg(long)]
+    pub ascii_images: bool,
 
     /// Theme: dark, light, dracula, or path to JSON file.
     #[arg(short = 's', long = "style")]

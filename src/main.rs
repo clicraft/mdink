@@ -160,8 +160,9 @@ fn main() -> color_eyre::Result<()> {
         (content, safe_filename, bp)
     };
 
-    // Resolve no_images from CLI flag or config.
+    // Resolve no_images and ascii_images from CLI flag or config.
     let no_images = cli.no_images || config.no_images.unwrap_or(false);
+    let ascii_images = cli.ascii_images || config.ascii_images.unwrap_or(false);
 
     // Load syntax highlighting resources (expensive, done once).
     let highlighter = highlight::Highlighter::new();
@@ -181,10 +182,10 @@ fn main() -> color_eyre::Result<()> {
         p
     };
 
-    let mut image_manager = ImageManager::new(base_path, picker, cols);
+    let mut image_manager = ImageManager::new(base_path, picker, cols, no_images, ascii_images);
 
-    // Parse markdown into IR blocks (done once — blocks don't depend on width).
-    let blocks = parser::parse(&source, &highlighter, &mut image_manager, &theme);
+    // Parse markdown into IR blocks. Kept mutable so refresh can re-parse.
+    let mut blocks = parser::parse(&source, &highlighter, &mut image_manager, &theme);
 
     // Flatten blocks into document lines at the current width.
     let document = layout::flatten(&blocks, cols, &theme);
@@ -198,7 +199,14 @@ fn main() -> color_eyre::Result<()> {
     TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
 
     // Main event loop.
-    let result = run_event_loop(&mut terminal, &mut app, &blocks, &mut image_manager);
+    let result = run_event_loop(
+        &mut terminal,
+        &mut app,
+        &mut blocks,
+        &mut image_manager,
+        &source,
+        &highlighter,
+    );
 
     // Always restore the terminal, even if the loop returned an error.
     ratatui::restore();
@@ -223,13 +231,15 @@ fn compute_content_width(cols: u16, app: &App) -> u16 {
 /// Runs the TUI event loop until the user quits or an error occurs.
 ///
 /// Separated from `main()` so that `ratatui::restore()` always runs
-/// regardless of how this function exits. Takes a reference to the
-/// parsed blocks so resize can re-flatten without re-parsing.
+/// regardless of how this function exits. Takes mutable blocks so
+/// refresh can re-parse, and source/highlighter for re-parsing.
 fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    blocks: &[RenderedBlock],
+    blocks: &mut Vec<RenderedBlock>,
     image_manager: &mut ImageManager,
+    source: &str,
+    highlighter: &highlight::Highlighter,
 ) -> color_eyre::Result<()> {
     let mut cols = terminal.size()?.width;
 
@@ -246,6 +256,20 @@ fn run_event_loop(
         match event {
             Event::Key(key) => {
                 app.handle_key(key);
+                if app.refresh_requested {
+                    let size = terminal.size()?;
+                    let cols = size.width;
+                    app.viewport_height = size.height.saturating_sub(1) as usize;
+                    image_manager.update_max_width(cols);
+                    image_manager.clear_protocols();
+                    *blocks = parser::parse(source, highlighter, image_manager, &app.theme);
+                    app.document = layout::flatten(blocks, cols, &app.theme);
+                    let max = app.max_scroll();
+                    if app.scroll_offset > max {
+                        app.scroll_offset = max;
+                    }
+                    app.refresh_requested = false;
+                }
             }
             Event::Resize(new_cols, _rows) => {
                 cols = new_cols;

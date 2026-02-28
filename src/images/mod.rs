@@ -8,38 +8,105 @@ use std::fs;
 use std::path::PathBuf;
 
 use color_eyre::eyre::{self, eyre};
+use image::imageops::FilterType;
 use image::ImageReader;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
 /// Maximum image file size (10 MB). Prevents OOM during decode.
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Default font cell size in pixels (width, height) when no picker is available.
+/// Typical terminal fonts are 8px wide × 16px tall. Used by ASCII art rendering
+/// to compute natural image dimensions in cell units.
+const DEFAULT_FONT_SIZE: (u16, u16) = (8, 16);
+
+/// Character ramp ordered by visual density (fraction of cell filled).
+/// Combines braille, block shades, and ASCII into one 18-level gradient.
+const DENSITY_RAMP: &[char] = &[
+    ' ', '.', '·', '⠂', ':', '⠒', '-', '░', '=', '+', '⠿', '▒', '*', '#', '⣿', '▓', '@', '█',
+];
+
 /// Owns the terminal graphics picker and all loaded image protocols.
 ///
 /// Created once at startup, passed to the parser (for loading images)
-/// and to the renderer (for drawing them). When `picker` is `None`,
-/// all images degrade to alt-text fallback.
+/// and to the renderer (for drawing them). When `picker` is `None` and
+/// `no_images` is false, images are rendered as colored ASCII art.
+/// When `no_images` is true, all images degrade to alt-text fallback.
 pub struct ImageManager {
     picker: Option<Picker>,
     protocols: Vec<StatefulProtocol>,
     base_path: PathBuf,
     max_width: u16,
+    no_images: bool,
+    force_ascii: bool,
 }
 
 impl ImageManager {
     /// Creates a new `ImageManager`.
     ///
     /// - `base_path`: directory of the markdown file (for resolving relative image paths).
-    /// - `picker`: terminal graphics picker, or `None` to disable images.
+    /// - `picker`: terminal graphics picker, or `None` when terminal lacks graphics.
     /// - `max_width`: terminal width in columns (images are scaled to fit).
-    pub fn new(base_path: PathBuf, picker: Option<Picker>, max_width: u16) -> Self {
+    /// - `no_images`: when true, all images degrade to alt-text (user passed `--no-images`).
+    /// - `force_ascii`: when true, always use ASCII art instead of native graphics.
+    pub fn new(
+        base_path: PathBuf,
+        picker: Option<Picker>,
+        max_width: u16,
+        no_images: bool,
+        force_ascii: bool,
+    ) -> Self {
         Self {
             picker,
             protocols: Vec::new(),
             base_path,
             max_width,
+            no_images,
+            force_ascii,
         }
+    }
+
+    /// Returns true if the terminal supports a graphics protocol (Sixel/Kitty/iTerm2/halfblocks).
+    pub fn has_graphics_support(&self) -> bool {
+        self.picker.is_some()
+    }
+
+    /// Returns true if the user explicitly disabled images via `--no-images`.
+    pub fn images_disabled(&self) -> bool {
+        self.no_images
+    }
+
+    /// Returns true if ASCII art rendering should be preferred over native graphics.
+    pub fn prefer_ascii(&self) -> bool {
+        self.force_ascii
+    }
+
+    /// Updates the maximum width (e.g. after terminal resize or refresh).
+    pub fn update_max_width(&mut self, width: u16) {
+        self.max_width = width;
+    }
+
+    /// Returns the font cell size in pixels (width, height).
+    ///
+    /// Uses the picker's detected font size when available, otherwise falls
+    /// back to `DEFAULT_FONT_SIZE`. Used by ASCII art rendering to compute
+    /// natural image dimensions in cell units.
+    fn font_size(&self) -> (u16, u16) {
+        self.picker
+            .as_ref()
+            .map(|p| p.font_size())
+            .unwrap_or(DEFAULT_FONT_SIZE)
+    }
+
+    /// Clears all loaded protocols so indices start fresh on re-parse.
+    ///
+    /// Must be called before re-parsing to avoid unbounded growth of the
+    /// protocols vec (each `load_image` call pushes a new entry).
+    pub fn clear_protocols(&mut self) {
+        self.protocols.clear();
     }
 
     /// Loads an image and returns its protocol index and cell dimensions.
@@ -97,6 +164,78 @@ impl ImageManager {
         self.protocols.push(protocol);
 
         Ok((index, w_cells, h_cells))
+    }
+
+    /// Loads an image and converts it to colored ASCII art lines.
+    ///
+    /// Each pixel is mapped to a density character colored with its RGB value.
+    /// The image is sized using font metrics (pixel dimensions ÷ font cell size)
+    /// to match its natural size in terminal cells, then scaled down only if it
+    /// exceeds `max_width`.
+    ///
+    /// Returns `Vec<Line<'static>>` on success, one `Line` per row of the image.
+    pub fn load_ascii_image(&self, src: &str) -> eyre::Result<Vec<Line<'static>>> {
+        let path = self.base_path.join(src);
+
+        let file_size = fs::metadata(&path)
+            .map_err(|e| eyre!("cannot read image '{}': {}", path.display(), e))?
+            .len();
+        if file_size > MAX_IMAGE_BYTES {
+            return Err(eyre!(
+                "image '{}' too large ({} bytes; limit is {} bytes)",
+                path.display(),
+                file_size,
+                MAX_IMAGE_BYTES
+            ));
+        }
+
+        let dyn_img = ImageReader::open(&path)
+            .map_err(|e| eyre!("cannot open image '{}': {}", path.display(), e))?
+            .with_guessed_format()
+            .map_err(|e| eyre!("cannot detect format for '{}': {}", path.display(), e))?
+            .decode()
+            .map_err(|e| eyre!("cannot decode image '{}': {}", path.display(), e))?;
+
+        // Compute natural cell dimensions from pixel size and font metrics.
+        let (px_w, px_h) = (dyn_img.width(), dyn_img.height());
+        let (font_w, font_h) = self.font_size();
+        let font_w = font_w.max(1) as u32;
+        let font_h = font_h.max(1) as u32;
+
+        let mut w = px_w.div_ceil(font_w);
+        let mut h = px_h.div_ceil(font_h);
+
+        // Scale down to fit terminal width, maintaining aspect ratio.
+        let max_w = self.max_width.max(1) as u32;
+        if w > max_w && w > 0 {
+            let scale = max_w as f64 / w as f64;
+            w = max_w;
+            h = (h as f64 * scale).ceil() as u32;
+        }
+        let w = w.max(1);
+        let h = h.max(1);
+
+        let rgb = dyn_img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
+
+        let ramp_len = DENSITY_RAMP.len();
+        let mut lines = Vec::with_capacity(h as usize);
+        for y in 0..h {
+            let mut spans = Vec::with_capacity(w as usize);
+            for x in 0..w {
+                let pixel = rgb.get_pixel(x, y);
+                let [r, g, b] = pixel.0;
+                let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+                let idx = ((luminance / 255.0) * (ramp_len - 1) as f64).round() as usize;
+                let ch = DENSITY_RAMP[idx.min(ramp_len - 1)];
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(Color::Rgb(r, g, b)),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        Ok(lines)
     }
 
     /// Returns a mutable reference to a protocol by index.

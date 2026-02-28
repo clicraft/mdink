@@ -45,6 +45,8 @@ pub struct App {
     /// Session-only outline width override (percentage). `None` = use theme default.
     /// Set by `<`/`>` keys at runtime; not persisted.
     pub outline_width_percent: Option<u16>,
+    /// When true, the event loop should re-parse and re-render the document.
+    pub refresh_requested: bool,
 }
 
 impl App {
@@ -64,6 +66,7 @@ impl App {
             needs_reflatten: false,
             pending_jump: None,
             outline_width_percent: None,
+            refresh_requested: false,
         }
     }
 
@@ -122,6 +125,8 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.scroll_to_top(),
             // Scroll to bottom (Shift+g = 'G')
             KeyCode::Char('G') | KeyCode::End => self.scroll_to_bottom(),
+            // Refresh / re-render
+            KeyCode::Char('r') => self.refresh_requested = true,
             // Quit
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             // Ctrl+C also quits

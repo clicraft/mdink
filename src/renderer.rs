@@ -135,6 +135,10 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     let paragraph = Paragraph::new(rule_line);
                     frame.render_widget(paragraph, line_area);
                 }
+                DocumentLine::AsciiArt(line) => {
+                    let paragraph = Paragraph::new(line.clone());
+                    frame.render_widget(paragraph, line_area);
+                }
                 DocumentLine::ImageStart { protocol_index, height } => {
                     let available = content_area.height.saturating_sub(i as u16);
                     let render_height = (*height).min(available);
