@@ -21,6 +21,7 @@ mdink README.md
 - **Block quotes** — nested, with full inline formatting
 - **Tables** — column alignment, CJK-aware width calculation
 - **Horizontal rules**
+- **Outline panel** — toggle a table-of-contents sidebar (`o`) with heading navigation, jump-to-heading, and resizable width
 - **Terminal images** — Sixel, Kitty, iTerm2, and half-block fallback; degrades gracefully to alt text
 - **Responsive layout** — re-flows at the correct width on every terminal resize
 
@@ -55,6 +56,10 @@ The `--no-images` flag is useful on terminals that do not support any graphics p
 | `u` / `PgUp` | Scroll up half a page |
 | `g` / `Home` | Jump to top |
 | `G` / `End` | Jump to bottom |
+| `o` | Toggle outline panel |
+| `Tab` / `Shift+Tab` | Navigate outline headings |
+| `Enter` | Jump to selected heading |
+| `<` / `>` | Shrink / grow outline panel |
 | `q` / `Esc` / `Ctrl+C` | Quit |
 
 ## Image support

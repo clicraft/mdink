@@ -7,11 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-02-28
+
 ### Added
+- **Outline panel** — press `o` to toggle a table-of-contents sidebar showing h1–h3 headings
+  - Wide terminals (≥ 101 cols): persistent side panel with vertical border
+  - Narrow terminals: dropdown overlay with bordered frame
+  - `Tab` / `Shift+Tab` to navigate headings, `Enter` to jump, `Esc` to close
+  - `<` / `>` to shrink/grow panel width (2% per press, range 10–33%)
+  - Percentage-based width (`width_percent` in theme) adapts to terminal size
+  - Visual polish: content padding, hanging indent for wrapped headings, blank-line separators
+- Outline panel colors are fully theme-configurable (`outline` section in theme JSON)
 - GitHub wiki with 10 reference pages (Installation, CLI Reference, Keybindings, Themes, Terminal Compatibility, Font Slot Strategy, Architecture, Contributing, Release Process)
 
 ### Changed
-- README: added wiki link and updated stale pre-built binary copy to reflect shipped v0.1.1 release targets
+- README: added outline panel to features list and navigation table
+- Wiki: updated Keybindings page with outline keys, Themes page with outline schema
 
 ## [0.1.2] - 2026-02-28
 
