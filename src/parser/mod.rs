@@ -518,8 +518,7 @@ impl<'a> ParseContext<'a> {
 
     /// Attempts ASCII art rendering; falls back to `ImageFallback` on error.
     fn emit_ascii_or_fallback(&mut self, dest_url: &str, alt_text: String) {
-        let width = self.images.max_width();
-        match self.images.load_ascii_image(dest_url, width) {
+        match self.images.load_ascii_image(dest_url) {
             Ok(lines) => {
                 self.emit_block(RenderedBlock::AsciiImage { lines, alt_text });
             }

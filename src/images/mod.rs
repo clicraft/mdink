@@ -18,6 +18,11 @@ use ratatui_image::protocol::StatefulProtocol;
 /// Maximum image file size (10 MB). Prevents OOM during decode.
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Default font cell size in pixels (width, height) when no picker is available.
+/// Typical terminal fonts are 8px wide × 16px tall. Used by ASCII art rendering
+/// to compute natural image dimensions in cell units.
+const DEFAULT_FONT_SIZE: (u16, u16) = (8, 16);
+
 /// Character ramp ordered by visual density (fraction of cell filled).
 /// Combines braille, block shades, and ASCII into one 18-level gradient.
 const DENSITY_RAMP: &[char] = &[
@@ -79,14 +84,21 @@ impl ImageManager {
         self.force_ascii
     }
 
-    /// Returns the maximum image width in terminal columns.
-    pub fn max_width(&self) -> u16 {
-        self.max_width
-    }
-
     /// Updates the maximum width (e.g. after terminal resize or refresh).
     pub fn update_max_width(&mut self, width: u16) {
         self.max_width = width;
+    }
+
+    /// Returns the font cell size in pixels (width, height).
+    ///
+    /// Uses the picker's detected font size when available, otherwise falls
+    /// back to `DEFAULT_FONT_SIZE`. Used by ASCII art rendering to compute
+    /// natural image dimensions in cell units.
+    fn font_size(&self) -> (u16, u16) {
+        self.picker
+            .as_ref()
+            .map(|p| p.font_size())
+            .unwrap_or(DEFAULT_FONT_SIZE)
     }
 
     /// Clears all loaded protocols so indices start fresh on re-parse.
@@ -157,11 +169,12 @@ impl ImageManager {
     /// Loads an image and converts it to colored ASCII art lines.
     ///
     /// Each pixel is mapped to a density character colored with its RGB value.
-    /// The image is resized to fit `width` columns with aspect-ratio correction
-    /// (terminal cells are ~2x taller than wide).
+    /// The image is sized using font metrics (pixel dimensions ÷ font cell size)
+    /// to match its natural size in terminal cells, then scaled down only if it
+    /// exceeds `max_width`.
     ///
     /// Returns `Vec<Line<'static>>` on success, one `Line` per row of the image.
-    pub fn load_ascii_image(&self, src: &str, width: u16) -> eyre::Result<Vec<Line<'static>>> {
+    pub fn load_ascii_image(&self, src: &str) -> eyre::Result<Vec<Line<'static>>> {
         let path = self.base_path.join(src);
 
         let file_size = fs::metadata(&path)
@@ -183,10 +196,24 @@ impl ImageManager {
             .decode()
             .map_err(|e| eyre!("cannot decode image '{}': {}", path.display(), e))?;
 
-        let w = width.max(1) as u32;
-        let aspect = dyn_img.height() as f64 / dyn_img.width().max(1) as f64;
-        // Divide by 2 because terminal cells are ~2x taller than wide.
-        let h = ((w as f64 * aspect) / 2.0).ceil().max(1.0) as u32;
+        // Compute natural cell dimensions from pixel size and font metrics.
+        let (px_w, px_h) = (dyn_img.width(), dyn_img.height());
+        let (font_w, font_h) = self.font_size();
+        let font_w = font_w.max(1) as u32;
+        let font_h = font_h.max(1) as u32;
+
+        let mut w = px_w.div_ceil(font_w);
+        let mut h = px_h.div_ceil(font_h);
+
+        // Scale down to fit terminal width, maintaining aspect ratio.
+        let max_w = self.max_width.max(1) as u32;
+        if w > max_w && w > 0 {
+            let scale = max_w as f64 / w as f64;
+            w = max_w;
+            h = (h as f64 * scale).ceil() as u32;
+        }
+        let w = w.max(1);
+        let h = h.max(1);
 
         let rgb = dyn_img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
 

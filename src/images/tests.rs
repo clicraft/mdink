@@ -58,33 +58,35 @@
     #[test]
     fn test_max_width_and_update() {
         let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false);
-        assert_eq!(mgr.max_width(), 80);
+        assert_eq!(mgr.max_width, 80);
         mgr.update_max_width(120);
-        assert_eq!(mgr.max_width(), 120);
+        assert_eq!(mgr.max_width, 120);
     }
 
     #[test]
     fn test_load_ascii_image_returns_correct_width() {
+        // gradient.png is 160×120. With default font (8×16):
+        // natural size = 160/8=20 wide × 120/16=8 tall (fits in 80 cols).
         let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
-        let lines = mgr.load_ascii_image("gradient.png", 40).unwrap();
+        let lines = mgr.load_ascii_image("gradient.png").unwrap();
         assert!(!lines.is_empty(), "should produce lines");
-        // Every line should have exactly 40 spans (one per column).
+        assert_eq!(lines.len(), 8, "height should be 120/16 = 8 rows");
         for line in &lines {
-            assert_eq!(line.spans.len(), 40, "each line should have width spans");
+            assert_eq!(line.spans.len(), 20, "width should be 160/8 = 20 cols");
         }
     }
 
     #[test]
     fn test_load_ascii_image_missing_file_returns_err() {
         let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
-        let result = mgr.load_ascii_image("nonexistent.png", 40);
+        let result = mgr.load_ascii_image("nonexistent.png");
         assert!(result.is_err(), "missing file should return Err");
     }
 
     #[test]
     fn test_load_ascii_image_spans_have_rgb_foreground() {
         let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
-        let lines = mgr.load_ascii_image("gradient.png", 20).unwrap();
+        let lines = mgr.load_ascii_image("gradient.png").unwrap();
         // At least some spans should have an RGB foreground color.
         let has_rgb = lines.iter().any(|line| {
             line.spans
@@ -95,9 +97,10 @@
     }
 
     #[test]
-    fn test_load_ascii_image_width_1_no_panic() {
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
-        let lines = mgr.load_ascii_image("gradient.png", 1).unwrap();
+    fn test_load_ascii_image_max_width_1_clamps() {
+        // With max_width=1, image should scale down to 1 column.
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 1, false, false);
+        let lines = mgr.load_ascii_image("gradient.png").unwrap();
         assert!(!lines.is_empty());
         for line in &lines {
             assert_eq!(line.spans.len(), 1);
@@ -108,13 +111,15 @@
     fn test_load_ascii_image_rgba_png() {
         // rust-logo.png is 32x32 RGBA — tests that alpha channel images decode
         // without error (image crate composites alpha onto a background).
+        // With default font (8×16): 32/8=4 wide × 32/16=2 tall.
         let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
-        let lines = mgr.load_ascii_image("rust-logo.png", 40).unwrap();
+        let lines = mgr.load_ascii_image("rust-logo.png").unwrap();
         assert!(!lines.is_empty(), "RGBA image should produce lines");
-        assert_eq!(lines[0].spans.len(), 40, "width should match requested cols");
+        assert_eq!(lines[0].spans.len(), 4, "width should be 32/8 = 4 cols");
+        assert_eq!(lines.len(), 2, "height should be 32/16 = 2 rows");
 
         // Dump the ASCII art to stdout so `cargo test -- --nocapture` shows it.
-        eprintln!("\n--- rust-logo.png ASCII art (40 cols) ---");
+        eprintln!("\n--- rust-logo.png ASCII art (4×2 natural size) ---");
         for line in &lines {
             let row: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             eprintln!("{row}");
@@ -128,8 +133,8 @@
             .collect();
         let unique: std::collections::HashSet<char> = chars.iter().copied().collect();
         assert!(
-            unique.len() >= 3,
-            "logo should use at least 3 distinct density characters, got {}: {:?}",
+            unique.len() >= 2,
+            "logo should use at least 2 distinct density characters, got {}: {:?}",
             unique.len(),
             unique
         );

@@ -953,10 +953,14 @@
             if let Some(RenderedBlock::AsciiImage { lines, alt_text }) = ascii {
                 assert!(!lines.is_empty(), "{expected_alt}: should have lines");
                 assert_eq!(alt_text, expected_alt);
-                // 256x256 at 80 cols → 80 spans per line (scaled to terminal width).
+                // 256×256 with default font (8×16) → 32 wide × 16 tall (fits in 80 cols).
                 assert_eq!(
-                    lines[0].spans.len(), 80,
-                    "{expected_alt}: each line should have 80 spans"
+                    lines[0].spans.len(), 32,
+                    "{expected_alt}: width should be 256/8 = 32 cols"
+                );
+                assert_eq!(
+                    lines.len(), 16,
+                    "{expected_alt}: height should be 256/16 = 16 rows"
                 );
             }
         }
