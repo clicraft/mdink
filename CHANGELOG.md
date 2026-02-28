@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-28
+
+### Added
+- **ASCII image rendering** — `--ascii-images` flag converts images to colored ASCII art using Unicode half-block characters, works on every terminal with no graphics protocol required
+- **Images inside GFM tables** — image references in table cells are rendered inline (native protocol or ASCII art depending on mode)
+- **Native-to-ASCII fallback chain** — when `--ascii-images` is set, images first attempt native protocol rendering and automatically fall back to ASCII art
+- Font-metrics-based ASCII sizing — ASCII art images are proportionally scaled using terminal font dimensions instead of filling the full terminal width
+
+### Changed
+- `--ascii-images` is also configurable via `config.json` (`"ascii_images": true`)
+
 ## [0.1.3] - 2026-02-28
 
 ### Added

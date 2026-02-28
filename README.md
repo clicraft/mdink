@@ -23,6 +23,8 @@ mdink README.md
 - **Horizontal rules**
 - **Outline panel** — toggle a table-of-contents sidebar (`o`) with heading navigation, jump-to-heading, and resizable width
 - **Terminal images** — Sixel, Kitty, iTerm2, and half-block fallback; degrades gracefully to alt text
+- **ASCII image rendering** — `--ascii-images` converts images to colored ASCII art using Unicode half-blocks; works on *every* terminal, no graphics protocol needed
+- **Images in tables** — embed images inside GFM table cells with automatic sizing
 - **Responsive layout** — re-flows at the correct width on every terminal resize
 
 ## Installation
@@ -41,10 +43,11 @@ Pre-built binaries (Linux x86\_64/aarch64, macOS x86\_64/aarch64, Windows x86\_6
 
 ```
 mdink <FILE>
-mdink --no-images <FILE>   # disable image rendering
+mdink --ascii-images <FILE>   # render images as colored ASCII art
+mdink --no-images <FILE>      # disable image rendering entirely
 ```
 
-The `--no-images` flag is useful on terminals that do not support any graphics protocol or when you want faster startup.
+The `--ascii-images` flag renders images as colored Unicode half-block art — useful on terminals without graphics protocol support (plain SSH sessions, older terminals, screen/tmux). The `--no-images` flag disables all image rendering for faster startup.
 
 ## Navigation
 
@@ -64,7 +67,7 @@ The `--no-images` flag is useful on terminals that do not support any graphics p
 
 ## Image support
 
-Inline images require a terminal that supports at least one graphics protocol:
+mdink renders images using the best available method for your terminal:
 
 | Terminal | Protocol |
 |----------|----------|
@@ -74,7 +77,17 @@ Inline images require a terminal that supports at least one graphics protocol:
 | Alacritty ≥ 0.13 | Sixel |
 | Most others | Half-block fallback (Unicode block elements) |
 
-On unsupported terminals, images fall back to their alt text. Use `--no-images` to skip the protocol detection query entirely.
+### ASCII image mode
+
+For terminals with no graphics protocol at all (plain SSH, screen, tmux, older terminals), use `--ascii-images` to render images as colored ASCII art using Unicode half-block characters (`▀▄█`). The ASCII renderer uses terminal font metrics to scale images proportionally. This mode also works for images embedded inside GFM table cells.
+
+```
+mdink --ascii-images README.md
+```
+
+You can make this the default by adding `"ascii_images": true` to `~/.config/mdink/config.json`.
+
+On unsupported terminals without `--ascii-images`, images fall back to their alt text. Use `--no-images` to skip image rendering entirely.
 
 ## Minimum Rust version
 
