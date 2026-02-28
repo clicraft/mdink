@@ -1,4 +1,5 @@
     use super::*;
+    use crate::parser::TableCell;
     use ratatui::style::Modifier;
     use std::sync::LazyLock;
 
@@ -649,6 +650,14 @@
 
     // ── Phase 3: Table tests ─────────────────────────────────────
 
+    /// Extracts text from a TableCell::Text cell (panics on Block cells).
+    fn cell_text(cell: &TableCell) -> String {
+        match cell {
+            TableCell::Text(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
+            TableCell::Block(_) => panic!("expected TableCell::Text, got Block"),
+        }
+    }
+
     #[test]
     fn test_parser_table_headers_and_rows() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
@@ -657,10 +666,8 @@
         match &blocks[0] {
             RenderedBlock::Table { headers, rows, .. } => {
                 assert_eq!(headers.len(), 2, "two header columns");
-                let h0: String = headers[0].iter().map(|s| s.text.as_str()).collect();
-                let h1: String = headers[1].iter().map(|s| s.text.as_str()).collect();
-                assert_eq!(h0.trim(), "A");
-                assert_eq!(h1.trim(), "B");
+                assert_eq!(cell_text(&headers[0]).trim(), "A");
+                assert_eq!(cell_text(&headers[1]).trim(), "B");
                 assert_eq!(rows.len(), 1, "one body row");
                 assert_eq!(rows[0].len(), 2, "row has two cells");
             }
@@ -688,10 +695,8 @@
         let blocks = parse(md, h());
         match &blocks[0] {
             RenderedBlock::Table { rows, .. } => {
-                let cell0: String = rows[0][0].iter().map(|s| s.text.as_str()).collect();
-                let cell1: String = rows[0][1].iter().map(|s| s.text.as_str()).collect();
-                assert!(cell0.contains("foo"), "cell 0 should contain 'foo'");
-                assert!(cell1.contains("42"), "cell 1 should contain '42'");
+                assert!(cell_text(&rows[0][0]).contains("foo"), "cell 0 should contain 'foo'");
+                assert!(cell_text(&rows[0][1]).contains("42"), "cell 1 should contain '42'");
             }
             _ => panic!("expected Table block"),
         }
@@ -1048,5 +1053,308 @@
                 );
             }
             _ => panic!("expected two Paragraph blocks"),
+        }
+    }
+
+    // ── Table with image cell tests ──────────────────────────────
+
+    #[test]
+    fn test_parser_table_with_image_cell() {
+        // Parse a table whose first cell contains an image and second cell is text.
+        // Use force_ascii=true so the image becomes AsciiImage (not native Image).
+        let md = "| Image | Text |\n|-------|------|\n| ![gradient](gradient.png) | hello |";
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false, // images enabled
+            true,  // force ASCII art
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse(md, h(), &mut im, &theme);
+        assert_eq!(blocks.len(), 1, "should produce one Table block");
+        match &blocks[0] {
+            RenderedBlock::Table { headers, rows, .. } => {
+                assert_eq!(headers.len(), 2, "two header columns");
+                assert_eq!(rows.len(), 1, "one body row");
+                assert_eq!(rows[0].len(), 2, "row has two cells");
+                // First cell should be an AsciiImage block.
+                match &rows[0][0] {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                        assert!(!lines.is_empty(), "AsciiImage should have lines");
+                        assert_eq!(alt_text, "gradient");
+                    }
+                    other => panic!(
+                        "first cell should be TableCell::Block(AsciiImage), got: {}",
+                        match other {
+                            TableCell::Text(_) => "Text",
+                            TableCell::Block(_) => "Block(other)",
+                        }
+                    ),
+                }
+                // Second cell should be text.
+                match &rows[0][1] {
+                    TableCell::Text(spans) => {
+                        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                        assert!(text.contains("hello"), "second cell should contain 'hello', got: {text}");
+                    }
+                    _ => panic!("second cell should be TableCell::Text"),
+                }
+            }
+            _ => panic!("expected Table block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_table_two_images_layout_structure() {
+        // End-to-end test: parse a 2-column table with real images, run through
+        // layout, then verify precise structural properties of the output.
+        //
+        // gradient.png is 160×120 → 20 cols × 8 rows at default font (8×16).
+        // gitlab-logo.png is 256×256 → 32 cols × 16 rows at default font.
+        //
+        // The table row should be 16 lines tall (max of 8, 16), with the
+        // gradient cell padded with 8 blank lines below.
+        let md = "| A | B |\n|---|---|\n| ![gradient](gradient.png) | ![GitLab](gitlab-logo.png) |";
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false,
+            true, // force ASCII art
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse(md, h(), &mut im, &theme);
+
+        // ── Parser-level checks ────────────────────────────────────
+        assert_eq!(blocks.len(), 1, "should produce one Table block");
+        let (img_a_lines, img_b_lines) = match &blocks[0] {
+            RenderedBlock::Table { headers, rows, .. } => {
+                assert_eq!(headers.len(), 2);
+                assert_eq!(rows.len(), 1);
+
+                let a_lines = match &rows[0][0] {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                        assert_eq!(alt_text, "gradient");
+                        assert_eq!(lines.len(), 8, "gradient.png → 120/16 = 8 rows");
+                        assert_eq!(
+                            lines[0].spans.len(), 20,
+                            "gradient.png → 160/8 = 20 cols"
+                        );
+                        lines.len()
+                    }
+                    other => panic!(
+                        "cell A should be AsciiImage, got: {}",
+                        match other {
+                            TableCell::Text(_) => "Text",
+                            TableCell::Block(_) => "Block(other)",
+                        }
+                    ),
+                };
+
+                let b_lines = match &rows[0][1] {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                        assert_eq!(alt_text, "GitLab");
+                        assert_eq!(lines.len(), 16, "gitlab-logo.png → 256/16 = 16 rows");
+                        assert_eq!(
+                            lines[0].spans.len(), 32,
+                            "gitlab-logo.png → 256/8 = 32 cols"
+                        );
+                        lines.len()
+                    }
+                    other => panic!(
+                        "cell B should be AsciiImage, got: {}",
+                        match other {
+                            TableCell::Text(_) => "Text",
+                            TableCell::Block(_) => "Block(other)",
+                        }
+                    ),
+                };
+
+                (a_lines, b_lines)
+            }
+            _ => panic!("expected Table block"),
+        };
+
+        // ── Layout-level checks ────────────────────────────────────
+        let doc = crate::layout::flatten(&blocks, 80, &theme);
+        let row_height = img_a_lines.max(img_b_lines); // 16
+        assert_eq!(row_height, 16);
+        // header(1) + separator(1) + body_row(16) = 18
+        assert_eq!(
+            doc.total_height, 18,
+            "expected 18 lines (1 header + 1 sep + 16 row), got {}",
+            doc.total_height
+        );
+
+        // Every line must be a Text line (table output is always Text).
+        for (i, line) in doc.lines.iter().enumerate() {
+            assert!(
+                matches!(line, crate::layout::DocumentLine::Text(_)),
+                "line {i} should be DocumentLine::Text"
+            );
+        }
+
+        // ── Column separator alignment check ───────────────────────
+        // Every line in the body row (lines 2..18) must have the " │ "
+        // separator at the same *display column*, proving that cell widths
+        // are consistent across all 16 lines of the multi-line row.
+        //
+        // We measure display-column offset (not byte offset) because the
+        // density ramp includes multi-byte characters (braille, block shading)
+        // whose byte widths vary per row even though display widths are uniform.
+        let mut sep_display_cols: Vec<Option<usize>> = Vec::new();
+        for line_idx in 2..18 {
+            if let crate::layout::DocumentLine::Text(line) = &doc.lines[line_idx] {
+                // Walk spans, accumulating display width until we find " │ ".
+                let mut col = 0usize;
+                let mut found = None;
+                for span in &line.spans {
+                    if span.content.as_ref() == " │ " {
+                        found = Some(col);
+                        break;
+                    }
+                    col += unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+                }
+                sep_display_cols.push(found);
+            }
+        }
+        // All 16 lines must have a separator.
+        assert!(
+            sep_display_cols.iter().all(|o| o.is_some()),
+            "every row line must contain ' │ ' separator; cols: {sep_display_cols:?}"
+        );
+        // All separators must be at the same display column.
+        let first = sep_display_cols[0].unwrap();
+        for (i, col) in sep_display_cols.iter().enumerate() {
+            assert_eq!(
+                col.unwrap(),
+                first,
+                "separator on row line {i} at display col {} differs from first line col {first}",
+                col.unwrap()
+            );
+        }
+
+        // ── Image color preservation check ─────────────────────────
+        // The gradient image must produce spans with non-default RGB colors
+        // in the first body-row line (line index 2). This confirms that
+        // image colors survive the flatten_cell_to_lines → truncate path.
+        if let crate::layout::DocumentLine::Text(line) = &doc.lines[2] {
+            let has_rgb = line.spans.iter().any(|s| {
+                matches!(
+                    s.style.fg,
+                    Some(ratatui::style::Color::Rgb(_, _, _))
+                )
+            });
+            assert!(
+                has_rgb,
+                "first body-row line should contain RGB-colored image spans"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parser_table_image_and_text_row_height() {
+        // A row with one image cell (8 lines) and one text cell (1 line).
+        // The text cell must be padded to 8 lines, and separator alignment
+        // must hold on every line.
+        let md = "| Pic | Name |\n|-----|------|\n| ![gradient](gradient.png) | A gradient |";
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false,
+            true,
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse(md, h(), &mut im, &theme);
+        let doc = crate::layout::flatten(&blocks, 80, &theme);
+
+        // header(1) + sep(1) + row(8) = 10
+        assert_eq!(doc.total_height, 10, "expected 10 lines, got {}", doc.total_height);
+
+        // Collect all row lines (indices 2..10).
+        let mut row_texts: Vec<String> = Vec::new();
+        for line_idx in 2..10 {
+            if let crate::layout::DocumentLine::Text(line) = &doc.lines[line_idx] {
+                row_texts.push(
+                    line.spans.iter().map(|s| s.content.as_ref()).collect(),
+                );
+            }
+        }
+        assert_eq!(row_texts.len(), 8, "body row should be 8 lines");
+
+        // First line should contain text "A gradient" in the second column.
+        assert!(
+            row_texts[0].contains("A gradient"),
+            "first row line should contain text cell content, got: {:?}",
+            row_texts[0]
+        );
+
+        // Lines 2..8 (the padding lines) should have an empty second column
+        // but still have the " │ " separator.
+        for (i, text) in row_texts.iter().enumerate().skip(1) {
+            assert!(
+                text.contains(" │ "),
+                "padding line {i} should still have separator, got: {text:?}"
+            );
+        }
+
+        // All separators must be at the same display column.
+        // Use span-level analysis (not byte offsets) because multi-byte
+        // density characters cause byte positions to vary across rows.
+        let mut sep_cols: Vec<Option<usize>> = Vec::new();
+        for line_idx in 2..10 {
+            if let crate::layout::DocumentLine::Text(line) = &doc.lines[line_idx] {
+                let mut col = 0usize;
+                let mut found = None;
+                for span in &line.spans {
+                    if span.content.as_ref() == " │ " {
+                        found = Some(col);
+                        break;
+                    }
+                    col += unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+                }
+                sep_cols.push(found);
+            }
+        }
+        assert_eq!(sep_cols.len(), 8, "all 8 lines should have separators");
+        assert!(sep_cols.iter().all(|o| o.is_some()), "every line should have separator");
+        let first = sep_cols[0].unwrap();
+        for (i, col) in sep_cols.iter().enumerate() {
+            assert_eq!(col.unwrap(), first, "separator misaligned at row line {i}");
+        }
+    }
+
+    #[test]
+    fn test_parser_table_with_image_no_images_produces_fallback() {
+        // With no_images=true, images in table cells should become ImageFallback blocks.
+        let md = "| Pic |\n|-----|\n| ![photo](gradient.png) |";
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            true,  // no_images — disabled
+            false,
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse(md, h(), &mut im, &theme);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Table { rows, .. } => {
+                match &rows[0][0] {
+                    TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
+                        assert_eq!(alt_text, "photo");
+                    }
+                    other => panic!(
+                        "cell should be ImageFallback, got: {}",
+                        match other {
+                            TableCell::Text(_) => "Text",
+                            TableCell::Block(_) => "Block(other)",
+                        }
+                    ),
+                }
+            }
+            _ => panic!("expected Table block"),
         }
     }

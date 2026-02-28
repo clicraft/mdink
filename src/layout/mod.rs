@@ -9,7 +9,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::parser::{ListItem, RenderedBlock, StyledSpan};
+use crate::parser::{ListItem, RenderedBlock, StyledSpan, TableCell};
 use crate::theme::{self, MarkdownTheme};
 
 /// A pre-rendered document ready for viewport slicing and rendering.
@@ -336,15 +336,18 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usi
 
 // ── Table layout ─────────────────────────────────────────────────────────────
 
-/// Flattens a GFM table into `DocumentLine`s: header row, separator, body rows.
+/// Flattens a GFM table into `DocumentLine`s: header row(s), separator, body rows.
 ///
 /// Column widths are auto-calculated from the widest content in each column.
 /// If the total table width exceeds the terminal width, each column is capped
 /// proportionally to fit — the table is truncated, not panicking.
+///
+/// Rows containing block-level cells (e.g. ASCII art images) may span multiple
+/// terminal lines. Shorter cells in the same row are padded with blank lines.
 fn flatten_table(
-    headers: &[Vec<StyledSpan>],
+    headers: &[TableCell],
     alignments: &[Alignment],
-    rows: &[Vec<Vec<StyledSpan>>],
+    rows: &[Vec<TableCell>],
     width: usize,
     theme: &MarkdownTheme,
 ) -> Vec<DocumentLine> {
@@ -354,18 +357,15 @@ fn flatten_table(
     }
 
     // Calculate column widths: max of header and all body cells in that column.
-    // Use display width (UnicodeWidthStr) so CJK characters (2 columns wide)
-    // are measured correctly instead of counting Unicode scalar values.
     let mut col_widths: Vec<usize> = headers
         .iter()
-        .map(|cell| cell.iter().map(|s| s.text.width()).sum::<usize>().max(3))
+        .map(|cell| cell_display_width(cell).max(3))
         .collect();
 
     for row in rows {
         for (col, cell) in row.iter().enumerate() {
             if col < col_widths.len() {
-                let w: usize = cell.iter().map(|s| s.text.width()).sum();
-                col_widths[col] = col_widths[col].max(w);
+                col_widths[col] = col_widths[col].max(cell_display_width(cell));
             }
         }
     }
@@ -385,54 +385,159 @@ fn flatten_table(
     let sep_style = theme::table_border_style(&theme.table);
 
     let mut result = Vec::new();
-    result.push(DocumentLine::Text(Line::from(build_table_row(
-        headers,
-        &col_widths,
-        alignments,
-        Some(header_style),
-    ))));
+
+    // Header row (may be multi-line if headers contain images).
+    let header_cell_lines: Vec<Vec<Vec<Span<'static>>>> = headers
+        .iter()
+        .enumerate()
+        .map(|(col, cell)| {
+            let align = alignments.get(col).copied().unwrap_or(Alignment::None);
+            flatten_cell_to_lines(cell, col_widths[col], align, Some(header_style))
+        })
+        .collect();
+    result.extend(build_multi_line_row(&header_cell_lines, &col_widths));
+
+    // Separator row.
     result.push(DocumentLine::Text(Line::from(build_table_separator(
         &col_widths,
         sep_style,
     ))));
+
+    // Body rows.
     for row in rows {
-        result.push(DocumentLine::Text(Line::from(build_table_row(
-            row,
-            &col_widths,
-            alignments,
-            None,
-        ))));
+        let cell_lines: Vec<Vec<Vec<Span<'static>>>> = col_widths
+            .iter()
+            .enumerate()
+            .map(|(col, &col_w)| {
+                let cell = row.get(col);
+                let align = alignments.get(col).copied().unwrap_or(Alignment::None);
+                match cell {
+                    Some(c) => flatten_cell_to_lines(c, col_w, align, None),
+                    None => vec![vec![Span::raw(" ".repeat(col_w))]],
+                }
+            })
+            .collect();
+        result.extend(build_multi_line_row(&cell_lines, &col_widths));
     }
+
     result
 }
 
-/// Builds one row of a table as a flat `Vec<Span>`.
-fn build_table_row(
-    cells: &[Vec<StyledSpan>],
-    col_widths: &[usize],
-    alignments: &[Alignment],
-    extra_style: Option<Style>,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-
-    for (col, &col_w) in col_widths.iter().enumerate() {
-        if col > 0 {
-            spans.push(Span::raw(" │ ".to_string()));
+/// Returns the display width of a single table cell for column-width calculation.
+fn cell_display_width(cell: &TableCell) -> usize {
+    match cell {
+        TableCell::Text(spans) => spans.iter().map(|s| s.text.width()).sum(),
+        TableCell::Block(RenderedBlock::AsciiImage { lines, .. }) => lines
+            .first()
+            .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
+            .unwrap_or(0),
+        TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
+            format!("[image: {}]", alt_text).width()
         }
-        let cell = cells.get(col).map(Vec::as_slice).unwrap_or(&[]);
-        let plain: String = cell.iter().map(|s| s.text.as_str()).collect();
-        let align = alignments.get(col).copied().unwrap_or(Alignment::None);
-        let padded = align_cell(&plain, col_w, align);
+        TableCell::Block(_) => 5, // "[...]"
+    }
+}
 
-        let span = if let Some(style) = extra_style {
-            Span::styled(padded, style)
+/// Converts one table cell into lines of spans (outer vec = lines, inner = spans per line).
+///
+/// Text cells produce a single line (padded/truncated to `col_width`).
+/// AsciiImage cells produce N lines (one per image row), each truncated to `col_width`.
+fn flatten_cell_to_lines(
+    cell: &TableCell,
+    col_width: usize,
+    alignment: Alignment,
+    header_style: Option<Style>,
+) -> Vec<Vec<Span<'static>>> {
+    let lines = match cell {
+        TableCell::Text(spans) => {
+            let plain: String = spans.iter().map(|s| s.text.as_str()).collect();
+            let padded = align_cell(&plain, col_width, alignment);
+            let span = if let Some(style) = header_style {
+                Span::styled(padded, style)
+            } else {
+                Span::raw(padded)
+            };
+            vec![vec![span]]
+        }
+        TableCell::Block(RenderedBlock::AsciiImage { lines, .. }) => {
+            lines
+                .iter()
+                .map(|line| truncate_spans_to_width(&line.spans, col_width))
+                .collect()
+        }
+        TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
+            let text = format!("[image: {}]", alt_text);
+            let padded = align_cell(&text, col_width, alignment);
+            let span = if let Some(style) = header_style {
+                Span::styled(padded, style)
+            } else {
+                Span::raw(padded)
+            };
+            vec![vec![span]]
+        }
+        TableCell::Block(_) => {
+            let padded = align_cell("[...]", col_width, alignment);
+            vec![vec![Span::raw(padded)]]
+        }
+    };
+    // Guard: minimum 1 line per cell.
+    if lines.is_empty() {
+        vec![vec![Span::raw(" ".repeat(col_width))]]
+    } else {
+        lines
+    }
+}
+
+/// Truncates a slice of spans to fit within `max_width` display columns,
+/// padding with spaces if the spans are shorter.
+fn truncate_spans_to_width(spans: &[Span<'_>], max_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let sw = span.content.width();
+        if used + sw <= max_width {
+            out.push(Span::styled(span.content.to_string(), span.style));
+            used += sw;
         } else {
-            Span::raw(padded)
-        };
-        spans.push(span);
+            break;
+        }
+    }
+    if used < max_width {
+        out.push(Span::raw(" ".repeat(max_width - used)));
+    }
+    out
+}
+
+/// Composes per-cell line arrays into `DocumentLine`s for one table row.
+///
+/// Each cell may have a different number of lines (e.g. text = 1, image = 16).
+/// The row height is the maximum across all cells. Shorter cells are padded
+/// with blank lines below (top-aligned).
+fn build_multi_line_row(
+    cell_lines: &[Vec<Vec<Span<'static>>>],
+    col_widths: &[usize],
+) -> Vec<DocumentLine> {
+    let row_height = cell_lines.iter().map(|cl| cl.len()).max().unwrap_or(1);
+    let mut result = Vec::with_capacity(row_height);
+
+    for line_idx in 0..row_height {
+        let mut spans = Vec::new();
+        for (col, cl) in cell_lines.iter().enumerate() {
+            if col > 0 {
+                spans.push(Span::raw(" │ ".to_string()));
+            }
+            if line_idx < cl.len() {
+                spans.extend(cl[line_idx].iter().cloned());
+            } else {
+                // Empty padding below shorter cells.
+                let w = col_widths.get(col).copied().unwrap_or(3);
+                spans.push(Span::raw(" ".repeat(w)));
+            }
+        }
+        result.push(DocumentLine::Text(Line::from(spans)));
     }
 
-    spans
+    result
 }
 
 /// Builds the separator row (`───┼───`) for a table.

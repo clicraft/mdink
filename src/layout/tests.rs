@@ -1,5 +1,5 @@
     use super::*;
-    use crate::parser::StyledSpan;
+    use crate::parser::{StyledSpan, TableCell};
     use ratatui::style::{Color, Modifier, Style};
 
     /// Wrapper that passes the default theme so existing tests don't need updating.
@@ -475,8 +475,8 @@
 
     // ── Phase 3: Table layout tests ──────────────────────────────
 
-    fn make_cell(text: &str) -> Vec<StyledSpan> {
-        vec![plain_span(text)]
+    fn make_cell(text: &str) -> TableCell {
+        TableCell::Text(vec![plain_span(text)])
     }
 
     #[test]
@@ -517,7 +517,7 @@
     #[test]
     fn test_layout_table_no_panic_when_too_wide() {
         // Many wide columns that exceed terminal width — must not panic.
-        let headers: Vec<Vec<StyledSpan>> = (0..20).map(|i| make_cell(&format!("Header{i}"))).collect();
+        let headers: Vec<TableCell> = (0..20).map(|i| make_cell(&format!("Header{i}"))).collect();
         let alignments = vec![pulldown_cmark::Alignment::None; 20];
         let rows = vec![(0..20).map(|i| make_cell(&format!("cell{i}"))).collect()];
         let blocks = vec![RenderedBlock::Table { headers, alignments, rows }];
@@ -694,4 +694,285 @@
         // Must not panic.
         let doc = flatten_default(&blocks,80);
         assert!(doc.total_height >= 2);
+    }
+
+    // ── Table with image cell tests ─────────────────────────────
+
+    #[test]
+    fn test_layout_table_with_ascii_image_cell() {
+        // One text cell + one AsciiImage cell (3 lines).
+        // Expected: header(1) + sep(1) + row(3) = 5 lines total.
+        let image_lines = vec![
+            Line::from(vec![
+                Span::styled(".", Style::default().fg(Color::Rgb(100, 100, 100))),
+                Span::styled("#", Style::default().fg(Color::Rgb(200, 200, 200))),
+            ]),
+            Line::from(vec![
+                Span::styled("@", Style::default().fg(Color::Rgb(255, 255, 255))),
+                Span::styled(" ", Style::default().fg(Color::Rgb(0, 0, 0))),
+            ]),
+            Line::from(vec![
+                Span::styled("*", Style::default().fg(Color::Rgb(128, 128, 128))),
+                Span::styled("~", Style::default().fg(Color::Rgb(64, 64, 64))),
+            ]),
+        ];
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Text"), make_cell("Image")],
+            alignments: vec![
+                pulldown_cmark::Alignment::None,
+                pulldown_cmark::Alignment::None,
+            ],
+            rows: vec![vec![
+                make_cell("hello"),
+                TableCell::Block(RenderedBlock::AsciiImage {
+                    lines: image_lines,
+                    alt_text: "test".to_string(),
+                }),
+            ]],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        // header(1) + sep(1) + row(3, because image is 3 lines) = 5
+        assert_eq!(
+            doc.total_height, 5,
+            "table with 3-line image cell should produce 5 lines, got {}",
+            doc.total_height
+        );
+        // All lines should be Text (table output is always Text lines).
+        for (i, line) in doc.lines.iter().enumerate() {
+            assert!(
+                matches!(line, DocumentLine::Text(_)),
+                "line {i} should be Text"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_table_image_truncated_to_column() {
+        // Image wider than column width — spans should be truncated.
+        let wide_line = Line::from(vec![
+            Span::styled("ABCDEFGHIJ", Style::default().fg(Color::Rgb(255, 0, 0))),
+            Span::styled("KLMNOPQRST", Style::default().fg(Color::Rgb(0, 255, 0))),
+        ]);
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Img")],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![TableCell::Block(RenderedBlock::AsciiImage {
+                lines: vec![wide_line],
+                alt_text: "wide".to_string(),
+            })]],
+        }];
+        // Use a narrow terminal (15 cols) so the image must be truncated.
+        let doc = flatten_default(&blocks, 15);
+        assert_eq!(doc.total_height, 3, "header + sep + 1-line image row");
+        // The image row (line index 2) should not exceed the column width.
+        if let DocumentLine::Text(row_line) = &doc.lines[2] {
+            let row_width: usize = row_line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                row_width <= 15,
+                "image row should be truncated to fit terminal width, got {row_width}"
+            );
+        } else {
+            panic!("expected Text line for image row");
+        }
+    }
+
+    #[test]
+    fn test_layout_table_multiline_row_width_consistency() {
+        // Core invariant: every terminal line within one multi-line table row
+        // must have the same total display width. If this fails, the " │ "
+        // column separators would visually zig-zag.
+        //
+        // Build a synthetic 2-column table:
+        //   col 0: text cell "hello"  (1 line)
+        //   col 1: 5-line image       (5 lines)
+        // The text cell gets 4 padding lines; all 5 lines must match in width.
+        let image_lines: Vec<Line<'static>> = (0..5)
+            .map(|i| {
+                Line::from(vec![
+                    Span::styled(
+                        "#",
+                        Style::default().fg(Color::Rgb(50 * i, 100, 200)),
+                    ),
+                    Span::styled(
+                        "@",
+                        Style::default().fg(Color::Rgb(200, 50 * i, 100)),
+                    ),
+                    Span::styled(
+                        ".",
+                        Style::default().fg(Color::Rgb(100, 200, 50 * i)),
+                    ),
+                ])
+            })
+            .collect();
+
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Text"), make_cell("Image")],
+            alignments: vec![
+                pulldown_cmark::Alignment::None,
+                pulldown_cmark::Alignment::None,
+            ],
+            rows: vec![vec![
+                make_cell("hello"),
+                TableCell::Block(RenderedBlock::AsciiImage {
+                    lines: image_lines,
+                    alt_text: "synth".to_string(),
+                }),
+            ]],
+        }];
+        let doc = flatten_default(&blocks, 60);
+        // header(1) + sep(1) + row(5) = 7
+        assert_eq!(doc.total_height, 7);
+
+        // Measure every line's display width in the body row (indices 2..7).
+        let mut widths: Vec<usize> = Vec::new();
+        for line_idx in 2..7 {
+            if let DocumentLine::Text(line) = &doc.lines[line_idx] {
+                let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                widths.push(w);
+            }
+        }
+        assert_eq!(widths.len(), 5, "body row should be 5 lines");
+
+        // All 5 lines must have the same display width.
+        let first_width = widths[0];
+        for (i, &w) in widths.iter().enumerate() {
+            assert_eq!(
+                w, first_width,
+                "row line {i} has width {w}, expected {first_width} (same as first line)"
+            );
+        }
+
+        // The header line must also have the same width as body lines.
+        if let DocumentLine::Text(header_line) = &doc.lines[0] {
+            let hw: usize = header_line.spans.iter().map(|s| s.content.width()).sum();
+            assert_eq!(
+                hw, first_width,
+                "header width {hw} should match body row width {first_width}"
+            );
+        }
+
+        // First body line (index 2) should have RGB-colored spans from the image.
+        if let DocumentLine::Text(first_row) = &doc.lines[2] {
+            let has_rgb = first_row.spans.iter().any(|s| {
+                matches!(s.style.fg, Some(Color::Rgb(_, _, _)))
+            });
+            assert!(has_rgb, "image cell should preserve RGB colors in layout output");
+        }
+    }
+
+    #[test]
+    fn test_layout_table_two_images_different_heights() {
+        // Two image cells with different heights in the same row.
+        // Shorter image gets padding; all lines must have consistent width.
+        let short_img: Vec<Line<'static>> = (0..3)
+            .map(|_| Line::from(vec![Span::raw("AB".to_string())]))
+            .collect();
+        let tall_img: Vec<Line<'static>> = (0..7)
+            .map(|_| Line::from(vec![Span::raw("XY".to_string())]))
+            .collect();
+
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Short"), make_cell("Tall")],
+            alignments: vec![
+                pulldown_cmark::Alignment::None,
+                pulldown_cmark::Alignment::None,
+            ],
+            rows: vec![vec![
+                TableCell::Block(RenderedBlock::AsciiImage {
+                    lines: short_img,
+                    alt_text: "s".to_string(),
+                }),
+                TableCell::Block(RenderedBlock::AsciiImage {
+                    lines: tall_img,
+                    alt_text: "t".to_string(),
+                }),
+            ]],
+        }];
+        let doc = flatten_default(&blocks, 60);
+        // header(1) + sep(1) + row(7) = 9
+        assert_eq!(doc.total_height, 9, "row height should be max(3,7) = 7");
+
+        // Check width consistency on all body-row lines.
+        let body_widths: Vec<usize> = (2..9)
+            .filter_map(|i| {
+                if let DocumentLine::Text(line) = &doc.lines[i] {
+                    Some(line.spans.iter().map(|s| s.content.width()).sum())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(body_widths.len(), 7);
+        let first = body_widths[0];
+        for (i, &w) in body_widths.iter().enumerate() {
+            assert_eq!(w, first, "body line {i} has width {w}, expected {first}");
+        }
+
+        // Lines 3..6 (indices 5..9 from doc, but line_idx 3..7 in row)
+        // should have padding in the short-image column but content in the
+        // tall-image column.
+        for row_line_idx in 3..7usize {
+            let doc_idx = row_line_idx + 2; // offset by header + sep
+            if let DocumentLine::Text(line) = &doc.lines[doc_idx] {
+                let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                // Short image column (left) should be blank spaces.
+                // Tall image column (right) should still have "XY".
+                assert!(
+                    full.contains("XY"),
+                    "row line {row_line_idx}: tall image should still have content, got: {full:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_layout_table_image_fallback_cell() {
+        // An ImageFallback cell should render as "[image: alt]" text.
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Pic"), make_cell("Name")],
+            alignments: vec![
+                pulldown_cmark::Alignment::None,
+                pulldown_cmark::Alignment::None,
+            ],
+            rows: vec![vec![
+                TableCell::Block(RenderedBlock::ImageFallback {
+                    alt_text: "photo".to_string(),
+                }),
+                make_cell("sunset"),
+            ]],
+        }];
+        let doc = flatten_default(&blocks, 60);
+        // header(1) + sep(1) + row(1) = 3  (fallback is single-line)
+        assert_eq!(doc.total_height, 3);
+        if let DocumentLine::Text(row_line) = &doc.lines[2] {
+            let text: String = row_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains("[image: photo]"),
+                "fallback cell should render as '[image: photo]', got: {text:?}"
+            );
+            assert!(
+                text.contains("sunset"),
+                "text cell should contain 'sunset', got: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_table_empty_ascii_image_cell() {
+        // An AsciiImage with 0 lines should get the minimum-height guard
+        // (1 line of padding) instead of collapsing the row to 0 height.
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Img")],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![TableCell::Block(RenderedBlock::AsciiImage {
+                lines: vec![],
+                alt_text: "empty".to_string(),
+            })]],
+        }];
+        let doc = flatten_default(&blocks, 40);
+        // header(1) + sep(1) + row(1 minimum) = 3
+        assert_eq!(
+            doc.total_height, 3,
+            "empty image should produce minimum 1-line row"
+        );
     }

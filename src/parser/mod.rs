@@ -47,12 +47,12 @@ pub enum RenderedBlock {
     BlockQuote { children: Vec<RenderedBlock> },
     /// A GFM table with headers, column alignments, and body rows.
     Table {
-        /// Header cells (one `Vec<StyledSpan>` per column).
-        headers: Vec<Vec<StyledSpan>>,
+        /// Header cells (one `TableCell` per column).
+        headers: Vec<TableCell>,
         /// Per-column alignment from the separator row.
         alignments: Vec<Alignment>,
-        /// Body rows (one `Vec<Vec<StyledSpan>>` per row, inner vec = columns).
-        rows: Vec<Vec<Vec<StyledSpan>>>,
+        /// Body rows (one `Vec<TableCell>` per row).
+        rows: Vec<Vec<TableCell>>,
     },
     /// A successfully loaded image with a terminal graphics protocol.
     Image {
@@ -100,6 +100,19 @@ pub struct StyledSpan {
     pub style: Style,
 }
 
+/// A single cell in a GFM table.
+///
+/// Most cells contain inline text, but image cells carry a full `RenderedBlock`
+/// (always `AsciiImage` or `ImageFallback` — native `Image` blocks are forced
+/// to ASCII art inside tables because `StatefulProtocol` cannot render in
+/// sub-regions of table rows).
+pub enum TableCell {
+    /// Inline text content (the common case).
+    Text(Vec<StyledSpan>),
+    /// A block-level element occupying the entire cell (e.g. ASCII art image).
+    Block(RenderedBlock),
+}
+
 /// Parser state machine states.
 ///
 /// Tracks what block-level element we are currently inside. Events are
@@ -129,11 +142,13 @@ enum ParserState {
     InImage { dest_url: String, alt_buffer: String },
     /// Inside a GFM table; accumulating header/body cells row by row.
     InTable {
-        headers: Vec<Vec<StyledSpan>>,
+        headers: Vec<TableCell>,
         alignments: Vec<Alignment>,
-        rows: Vec<Vec<Vec<StyledSpan>>>,
-        current_row: Vec<Vec<StyledSpan>>,
+        rows: Vec<Vec<TableCell>>,
+        current_row: Vec<TableCell>,
         in_head: bool,
+        /// Staging area for a block emitted during cell parsing (e.g. an image).
+        cell_block: Option<RenderedBlock>,
     },
 }
 
@@ -283,13 +298,24 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InImage { dest_url, alt_buffer }) =
                     self.state_stack.pop()
                 {
+                    // Native Image blocks use StatefulProtocol which requires a
+                    // dedicated Rect — they can't render inside table cell spans.
+                    // Force ASCII art when we're inside a table context.
+                    let in_table = self
+                        .state_stack
+                        .iter()
+                        .any(|s| matches!(s, ParserState::InTable { .. }));
+
                     if self.images.images_disabled() {
                         // User explicitly disabled images via --no-images.
                         self.emit_block(RenderedBlock::ImageFallback {
                             alt_text: alt_buffer,
                         });
-                    } else if self.images.prefer_ascii() || !self.images.has_graphics_support() {
-                        // User forced ASCII art, or no graphics protocol available.
+                    } else if in_table
+                        || self.images.prefer_ascii()
+                        || !self.images.has_graphics_support()
+                    {
+                        // Inside table, user forced ASCII art, or no graphics protocol.
                         self.emit_ascii_or_fallback(&dest_url, alt_buffer);
                     } else {
                         // Terminal supports a graphics protocol — try native rendering.
@@ -373,12 +399,29 @@ impl<'a> ParseContext<'a> {
             }
             Event::Start(Tag::TableCell) => {
                 self.current_spans.clear();
-            }
-            Event::End(TagEnd::TableCell) => {
-                let cell = std::mem::take(&mut self.current_spans);
-                if let Some(ParserState::InTable { headers, current_row, in_head, .. }) =
+                // Clear any stale cell_block from a previous cell.
+                if let Some(ParserState::InTable { cell_block, .. }) =
                     self.state_stack.last_mut()
                 {
+                    *cell_block = None;
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                let text = std::mem::take(&mut self.current_spans);
+                if let Some(ParserState::InTable {
+                    headers,
+                    current_row,
+                    in_head,
+                    cell_block,
+                    ..
+                }) = self.state_stack.last_mut()
+                {
+                    let cell = if let Some(block) = cell_block.take() {
+                        // Image block takes precedence; text in same cell is dropped.
+                        TableCell::Block(block)
+                    } else {
+                        TableCell::Text(text)
+                    };
                     if *in_head {
                         headers.push(cell);
                     } else {
@@ -411,6 +454,16 @@ impl<'a> ParseContext<'a> {
                 self.push_style(theme::inline_style(&self.theme.link));
             }
             Event::End(TagEnd::Link) => self.pop_style(),
+            // Images inside table cells: push InImage state so subsequent events
+            // (alt text, End(Image)) route through on_image_event. When the image
+            // finishes, emit_block sees InTable on the stack and routes the block
+            // to cell_block instead of the top-level blocks vec.
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.state_stack.push(ParserState::InImage {
+                    dest_url: dest_url.to_string(),
+                    alt_buffer: String::new(),
+                });
+            }
             _ => {}
         }
     }
@@ -508,6 +561,10 @@ impl<'a> ParseContext<'a> {
                 }
                 ParserState::InBlockQuote { children } => {
                     children.push(block);
+                    return;
+                }
+                ParserState::InTable { cell_block, .. } => {
+                    *cell_block = Some(block);
                     return;
                 }
                 _ => {}
@@ -726,6 +783,7 @@ impl<'a> ParseContext<'a> {
             rows: Vec::new(),
             current_row: Vec::new(),
             in_head: false,
+            cell_block: None,
         });
     }
 
