@@ -36,6 +36,7 @@ pub struct ImageManager {
     base_path: PathBuf,
     max_width: u16,
     no_images: bool,
+    force_ascii: bool,
 }
 
 impl ImageManager {
@@ -45,13 +46,21 @@ impl ImageManager {
     /// - `picker`: terminal graphics picker, or `None` when terminal lacks graphics.
     /// - `max_width`: terminal width in columns (images are scaled to fit).
     /// - `no_images`: when true, all images degrade to alt-text (user passed `--no-images`).
-    pub fn new(base_path: PathBuf, picker: Option<Picker>, max_width: u16, no_images: bool) -> Self {
+    /// - `force_ascii`: when true, always use ASCII art instead of native graphics.
+    pub fn new(
+        base_path: PathBuf,
+        picker: Option<Picker>,
+        max_width: u16,
+        no_images: bool,
+        force_ascii: bool,
+    ) -> Self {
         Self {
             picker,
             protocols: Vec::new(),
             base_path,
             max_width,
             no_images,
+            force_ascii,
         }
     }
 
@@ -63,6 +72,11 @@ impl ImageManager {
     /// Returns true if the user explicitly disabled images via `--no-images`.
     pub fn images_disabled(&self) -> bool {
         self.no_images
+    }
+
+    /// Returns true if ASCII art rendering should be preferred over native graphics.
+    pub fn prefer_ascii(&self) -> bool {
+        self.force_ascii
     }
 
     /// Returns the maximum image width in terminal columns.

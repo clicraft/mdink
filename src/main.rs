@@ -160,8 +160,9 @@ fn main() -> color_eyre::Result<()> {
         (content, safe_filename, bp)
     };
 
-    // Resolve no_images from CLI flag or config.
+    // Resolve no_images and ascii_images from CLI flag or config.
     let no_images = cli.no_images || config.no_images.unwrap_or(false);
+    let ascii_images = cli.ascii_images || config.ascii_images.unwrap_or(false);
 
     // Load syntax highlighting resources (expensive, done once).
     let highlighter = highlight::Highlighter::new();
@@ -181,7 +182,7 @@ fn main() -> color_eyre::Result<()> {
         p
     };
 
-    let mut image_manager = ImageManager::new(base_path, picker, cols, no_images);
+    let mut image_manager = ImageManager::new(base_path, picker, cols, no_images, ascii_images);
 
     // Parse markdown into IR blocks. Kept mutable so refresh can re-parse.
     let mut blocks = parser::parse(&source, &highlighter, &mut image_manager, &theme);

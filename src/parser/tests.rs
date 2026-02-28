@@ -17,7 +17,8 @@
             std::path::PathBuf::from("."),
             None, // no Picker
             80,
-            true, // no_images → always ImageFallback
+            true,  // no_images → always ImageFallback
+            false, // force_ascii
         );
         let theme = crate::theme::default_theme();
         super::parse(source, highlighter, &mut im, &theme)
@@ -848,7 +849,8 @@
             std::path::PathBuf::from("testdata"),
             None,
             80,
-            true, // explicitly disabled
+            true,  // explicitly disabled
+            false, // force_ascii
         );
         let theme = crate::theme::default_theme();
         let blocks = super::parse("![photo](test-image.png)", h(), &mut im, &theme);
@@ -864,6 +866,7 @@
             None,
             80,
             false, // images enabled, but no graphics protocol
+            false, // force_ascii
         );
         let theme = crate::theme::default_theme();
         let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &theme);
@@ -882,12 +885,48 @@
             std::path::PathBuf::from("testdata"),
             None,
             80,
-            false,
+            false, // images enabled
+            false, // force_ascii
         );
         let theme = crate::theme::default_theme();
         let blocks = super::parse("![missing](does-not-exist.png)", h(), &mut im, &theme);
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "missing file should produce ImageFallback");
+    }
+
+    #[test]
+    fn test_parser_force_ascii_produces_ascii_image() {
+        // force_ascii=true + valid image → AsciiImage (not Image, even though
+        // picker would be available in a real terminal).
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false, // images enabled
+            true,  // force ASCII art
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &theme);
+        let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+        assert!(ascii.is_some(), "force_ascii=true should produce AsciiImage");
+        let native = blocks.iter().any(|b| matches!(b, RenderedBlock::Image { .. }));
+        assert!(!native, "force_ascii=true should NOT produce native Image");
+    }
+
+    #[test]
+    fn test_parser_force_ascii_missing_file_produces_fallback() {
+        // force_ascii=true + missing file → ImageFallback (ASCII art load fails).
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            false, // images enabled
+            true,  // force ASCII art
+        );
+        let theme = crate::theme::default_theme();
+        let blocks = super::parse("![missing](nonexistent.png)", h(), &mut im, &theme);
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "force_ascii + missing file should produce ImageFallback");
     }
 
     #[test]

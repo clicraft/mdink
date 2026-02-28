@@ -288,7 +288,10 @@ impl<'a> ParseContext<'a> {
                         self.emit_block(RenderedBlock::ImageFallback {
                             alt_text: alt_buffer,
                         });
-                    } else if self.images.has_graphics_support() {
+                    } else if self.images.prefer_ascii() || !self.images.has_graphics_support() {
+                        // User forced ASCII art, or no graphics protocol available.
+                        self.emit_ascii_or_fallback(&dest_url, alt_buffer);
+                    } else {
                         // Terminal supports a graphics protocol — try native rendering.
                         match self.images.load_image(&dest_url) {
                             Ok((protocol_index, width_cells, height_cells)) => {
@@ -300,27 +303,9 @@ impl<'a> ParseContext<'a> {
                                 });
                             }
                             Err(e) => {
+                                // Native failed — try ASCII art before giving up.
                                 eprintln!("warning: {e}");
-                                self.emit_block(RenderedBlock::ImageFallback {
-                                    alt_text: alt_buffer,
-                                });
-                            }
-                        }
-                    } else {
-                        // No graphics protocol — fall back to colored ASCII art.
-                        let width = self.images.max_width();
-                        match self.images.load_ascii_image(&dest_url, width) {
-                            Ok(lines) => {
-                                self.emit_block(RenderedBlock::AsciiImage {
-                                    lines,
-                                    alt_text: alt_buffer,
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("warning: {e}");
-                                self.emit_block(RenderedBlock::ImageFallback {
-                                    alt_text: alt_buffer,
-                                });
+                                self.emit_ascii_or_fallback(&dest_url, alt_buffer);
                             }
                         }
                     }
@@ -529,6 +514,20 @@ impl<'a> ParseContext<'a> {
             }
         }
         self.blocks.push(block);
+    }
+
+    /// Attempts ASCII art rendering; falls back to `ImageFallback` on error.
+    fn emit_ascii_or_fallback(&mut self, dest_url: &str, alt_text: String) {
+        let width = self.images.max_width();
+        match self.images.load_ascii_image(dest_url, width) {
+            Ok(lines) => {
+                self.emit_block(RenderedBlock::AsciiImage { lines, alt_text });
+            }
+            Err(e) => {
+                eprintln!("warning: {e}");
+                self.emit_block(RenderedBlock::ImageFallback { alt_text });
+            }
+        }
     }
 
     // ── Block handlers ───────────────────────────────────────────────────────

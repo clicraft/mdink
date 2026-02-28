@@ -2,7 +2,7 @@
 
     #[test]
     fn test_load_image_no_picker_returns_err() {
-        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false);
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false);
         let result = mgr.load_image("anything.png");
         assert!(result.is_err(), "should fail when picker is None");
     }
@@ -12,33 +12,43 @@
         // Even with no picker, the "no graphics support" error comes first.
         // With a picker we can't easily construct one in tests (needs terminal).
         // So we just verify the None-picker path.
-        let mut mgr = ImageManager::new(PathBuf::from("/nonexistent"), None, 80, false);
+        let mut mgr = ImageManager::new(PathBuf::from("/nonexistent"), None, 80, false, false);
         let result = mgr.load_image("nonexistent.png");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_image_manager_new_defaults() {
-        let mgr = ImageManager::new(PathBuf::from("/tmp"), None, 120, false);
+        let mgr = ImageManager::new(PathBuf::from("/tmp"), None, 120, false, false);
         assert!(mgr.picker.is_none());
         assert!(mgr.protocols.is_empty());
         assert_eq!(mgr.max_width, 120);
         assert!(!mgr.no_images);
+        assert!(!mgr.force_ascii);
+    }
+
+    #[test]
+    fn test_prefer_ascii_flag() {
+        let mgr_off = ImageManager::new(PathBuf::from("."), None, 80, false, false);
+        assert!(!mgr_off.prefer_ascii());
+
+        let mgr_on = ImageManager::new(PathBuf::from("."), None, 80, false, true);
+        assert!(mgr_on.prefer_ascii());
     }
 
     #[test]
     fn test_images_disabled_flag() {
-        let mgr_off = ImageManager::new(PathBuf::from("."), None, 80, true);
+        let mgr_off = ImageManager::new(PathBuf::from("."), None, 80, true, false);
         assert!(mgr_off.images_disabled());
         assert!(!mgr_off.has_graphics_support());
 
-        let mgr_on = ImageManager::new(PathBuf::from("."), None, 80, false);
+        let mgr_on = ImageManager::new(PathBuf::from("."), None, 80, false, false);
         assert!(!mgr_on.images_disabled());
     }
 
     #[test]
     fn test_clear_protocols() {
-        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false);
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false);
         // Simulate protocol accumulation (can't push real protocols without a picker,
         // but we can verify the clear method exists and the vec is empty after).
         mgr.clear_protocols();
@@ -47,7 +57,7 @@
 
     #[test]
     fn test_max_width_and_update() {
-        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false);
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false);
         assert_eq!(mgr.max_width(), 80);
         mgr.update_max_width(120);
         assert_eq!(mgr.max_width(), 120);
@@ -55,7 +65,7 @@
 
     #[test]
     fn test_load_ascii_image_returns_correct_width() {
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false);
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
         let lines = mgr.load_ascii_image("gradient.png", 40).unwrap();
         assert!(!lines.is_empty(), "should produce lines");
         // Every line should have exactly 40 spans (one per column).
@@ -66,14 +76,14 @@
 
     #[test]
     fn test_load_ascii_image_missing_file_returns_err() {
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false);
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
         let result = mgr.load_ascii_image("nonexistent.png", 40);
         assert!(result.is_err(), "missing file should return Err");
     }
 
     #[test]
     fn test_load_ascii_image_spans_have_rgb_foreground() {
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false);
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
         let lines = mgr.load_ascii_image("gradient.png", 20).unwrap();
         // At least some spans should have an RGB foreground color.
         let has_rgb = lines.iter().any(|line| {
@@ -86,7 +96,7 @@
 
     #[test]
     fn test_load_ascii_image_width_1_no_panic() {
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false);
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
         let lines = mgr.load_ascii_image("gradient.png", 1).unwrap();
         assert!(!lines.is_empty());
         for line in &lines {
@@ -98,7 +108,7 @@
     fn test_load_ascii_image_rgba_png() {
         // rust-logo.png is 32x32 RGBA — tests that alpha channel images decode
         // without error (image crate composites alpha onto a background).
-        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false);
+        let mgr = ImageManager::new(PathBuf::from("testdata"), None, 80, false, false);
         let lines = mgr.load_ascii_image("rust-logo.png", 40).unwrap();
         assert!(!lines.is_empty(), "RGBA image should produce lines");
         assert_eq!(lines[0].spans.len(), 40, "width should match requested cols");

@@ -14,6 +14,7 @@ use serde::Deserialize;
 pub struct Config {
     pub style: Option<String>,
     pub no_images: Option<bool>,
+    pub ascii_images: Option<bool>,
     pub no_color: Option<bool>,
 }
 
