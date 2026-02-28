@@ -1,5 +1,9 @@
 # mdink
 
+<p align="center">
+  <img src="assets/mdink-logo.png" alt="mdink" width="747">
+</p>
+
 A terminal markdown renderer with syntax highlighting and inline images. Inspired by [glow](https://github.com/charmbracelet/glow), built in Rust on [ratatui](https://ratatui.rs).
 
 ```
