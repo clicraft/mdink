@@ -214,7 +214,7 @@ fn main() -> color_eyre::Result<()> {
 fn compute_content_width(cols: u16, app: &App) -> u16 {
     if app.outline.is_some() && cols >= renderer::OUTLINE_MIN_COLS {
         let panel_w = app.outline_panel_cols(cols);
-        cols.saturating_sub(panel_w + 1 + renderer::OUTLINE_CONTENT_PAD)
+        cols.saturating_sub(panel_w + 1 + renderer::OUTLINE_CONTENT_PAD).max(1)
     } else {
         cols
     }
@@ -281,6 +281,13 @@ fn run_event_loop(
         if let Some(heading_idx) = app.pending_jump.take() {
             if let Some(entry) = app.document.headings.get(heading_idx) {
                 app.scroll_offset = entry.line_index.min(app.max_scroll());
+            } else {
+                debug_assert!(
+                    false,
+                    "pending_jump index {} out of bounds for {} headings",
+                    heading_idx,
+                    app.document.headings.len()
+                );
             }
         }
 

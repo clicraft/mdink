@@ -136,10 +136,11 @@ impl App {
     fn toggle_outline(&mut self) {
         if self.outline.is_some() {
             self.outline = None;
+            self.needs_reflatten = true;
         } else if !self.document.headings.is_empty() {
             self.outline = Some(OutlineState { selected: 0 });
+            self.needs_reflatten = true;
         }
-        self.needs_reflatten = true;
     }
 
     /// Selects the next heading in the outline (wraps around).
@@ -186,6 +187,7 @@ impl App {
     /// then clamps to at most 1/3 of the terminal width.
     pub fn outline_panel_cols(&self, terminal_width: u16) -> u16 {
         let percent = self.effective_outline_percent();
+        debug_assert!(percent <= 100, "outline percent {percent} exceeds 100");
         let from_percent = (terminal_width as u32 * percent as u32 / 100) as u16;
         from_percent.min(terminal_width / 3)
     }

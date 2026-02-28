@@ -203,6 +203,8 @@
         app.handle_key(key);
         // Should remain None when there are no headings.
         assert!(app.outline.is_none());
+        // No state changed, so no wasteful reflatten should be triggered.
+        assert!(!app.needs_reflatten);
     }
 
     #[test]

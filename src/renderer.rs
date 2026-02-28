@@ -59,7 +59,7 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
         let cr = Rect {
             x: area.x + panel_w + 1 + OUTLINE_CONTENT_PAD,
             y: area.y,
-            width: area.width.saturating_sub(panel_w + 1 + OUTLINE_CONTENT_PAD),
+            width: area.width.saturating_sub(panel_w + 1 + OUTLINE_CONTENT_PAD).max(1),
             height: full_content_height,
         };
         (Some(pr), Some(br), cr)
@@ -181,7 +181,7 @@ fn draw_outline_panel(frame: &mut Frame, app: &App, rect: Rect) {
 
     // Fill background.
     let bg_style = theme::outline_bg_style(&app.theme.outline);
-    for y in rect.y..rect.y + rect.height {
+    for y in rect.y..rect.y.saturating_add(rect.height) {
         let line_area = Rect { x: rect.x, y, width: rect.width, height: 1 };
         let fill = Span::styled(" ".repeat(rect.width as usize), bg_style);
         frame.render_widget(Paragraph::new(Line::from(fill)), line_area);
@@ -219,7 +219,7 @@ fn draw_outline_panel(frame: &mut Frame, app: &App, rect: Rect) {
 /// Draws the vertical border between outline panel and content.
 fn draw_outline_border(frame: &mut Frame, app: &App, rect: Rect) {
     let border_style = theme::outline_border_style(&app.theme.outline);
-    for y in rect.y..rect.y + rect.height {
+    for y in rect.y..rect.y.saturating_add(rect.height) {
         let line_area = Rect { x: rect.x, y, width: 1, height: 1 };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled("│", border_style))),
@@ -324,11 +324,13 @@ fn build_outline_visual_rows(
 
     for (i, heading) in headings.iter().enumerate() {
         // Insert a blank separator row before each heading except the first.
+        // Tagged with the *following* heading's index so `compute_outline_scroll`'s
+        // `rposition` search on the previous heading stops at its real content rows.
         if i > 0 {
             rows.push(OutlineVisualRow {
                 text: String::new(),
                 style: theme::outline_bg_style(outline_style),
-                heading_index: i.saturating_sub(1),
+                heading_index: i,
             });
         }
 
@@ -375,7 +377,11 @@ fn build_outline_visual_rows(
                 }
                 if byte_end == 0 {
                     // Character wider than available space; take at least one.
-                    byte_end = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    byte_end = remaining
+                        .chars()
+                        .next()
+                        .expect("remaining is non-empty")
+                        .len_utf8();
                 }
                 let (chunk, rest) = remaining.split_at(byte_end);
                 rows.push(OutlineVisualRow {
@@ -404,7 +410,9 @@ fn compute_outline_scroll(
     }
 
     // Find the first and last visual row for the selected heading.
-    let first_row = rows.iter().position(|r| r.heading_index == selected).unwrap_or(0);
+    let first_row = rows.iter().position(|r| r.heading_index == selected);
+    debug_assert!(first_row.is_some(), "selected heading {selected} has no visual rows");
+    let first_row = first_row.unwrap_or(0);
     let last_row = rows.iter().rposition(|r| r.heading_index == selected).unwrap_or(first_row);
 
     let mut scroll = current_scroll;
@@ -487,6 +495,10 @@ mod tests {
         // Separators are at indices 1 and 3.
         assert!(rows[1].text.is_empty(), "separator row should be empty");
         assert!(rows[3].text.is_empty(), "separator row should be empty");
+        // Separators are tagged with the *following* heading's index so
+        // compute_outline_scroll's rposition stops at real content rows.
+        assert_eq!(rows[1].heading_index, 1, "separator before B tagged with B's index");
+        assert_eq!(rows[3].heading_index, 2, "separator before C tagged with C's index");
     }
 
     #[test]
@@ -514,5 +526,52 @@ mod tests {
         // Continuation line: 4 spaces indent (2 base + 2 hanging).
         let cont_indent = rows[1].text.len() - rows[1].text.trim_start().len();
         assert_eq!(cont_indent, 4);
+    }
+
+    // ── compute_outline_scroll tests ────────────────────────────────
+
+    #[test]
+    fn test_scroll_empty_rows() {
+        let rows: Vec<OutlineVisualRow> = vec![];
+        assert_eq!(compute_outline_scroll(&rows, 0, 0, 5), 0);
+    }
+
+    #[test]
+    fn test_scroll_zero_visible() {
+        let headings = vec![heading(1, "A")];
+        let style = theme::OutlinePanelStyle::default();
+        let rows = build_outline_visual_rows(&headings, 40, 0, &style);
+        assert_eq!(compute_outline_scroll(&rows, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_scroll_selected_visible_no_change() {
+        let headings = vec![heading(1, "A"), heading(2, "B"), heading(3, "C")];
+        let style = theme::OutlinePanelStyle::default();
+        let rows = build_outline_visual_rows(&headings, 40, 0, &style);
+        // All 5 rows fit in 10 visible rows — scroll stays at 0.
+        assert_eq!(compute_outline_scroll(&rows, 0, 0, 10), 0);
+    }
+
+    #[test]
+    fn test_scroll_keeps_selected_heading_in_view() {
+        let headings = vec![heading(1, "A"), heading(2, "B"), heading(3, "C")];
+        let style = theme::OutlinePanelStyle::default();
+        // selected=2 (heading C) — rows: 0=A, 1=sep, 2=B, 3=sep, 4=C
+        let rows = build_outline_visual_rows(&headings, 40, 2, &style);
+        // With only 1 visible row, scroll must land on heading C (row 4).
+        let scroll = compute_outline_scroll(&rows, 0, 2, 1);
+        assert_eq!(scroll, 4);
+        assert!(!rows[scroll].text.is_empty(), "scrolled-to row must be heading text, not separator");
+    }
+
+    #[test]
+    fn test_scroll_selected_above_scrolls_up() {
+        let headings = vec![heading(1, "A"), heading(2, "B"), heading(3, "C")];
+        let style = theme::OutlinePanelStyle::default();
+        let rows = build_outline_visual_rows(&headings, 40, 0, &style);
+        // Current scroll=4, selected=0 (heading A at row 0) — must scroll up.
+        let scroll = compute_outline_scroll(&rows, 4, 0, 2);
+        assert_eq!(scroll, 0);
     }
 }
