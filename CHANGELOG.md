@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- GitHub wiki with 10 reference pages (Installation, CLI Reference, Keybindings, Themes, Terminal Compatibility, Font Slot Strategy, Architecture, Contributing, Release Process)
+
+### Changed
+- README: added wiki link and updated stale pre-built binary copy to reflect shipped v0.1.1 release targets
+
 ## [0.1.2] - 2026-02-28
 
 ### Added
