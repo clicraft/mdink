@@ -7,10 +7,12 @@
 mod app;
 mod cli;
 mod config;
+mod font_detect;
 mod highlight;
 mod images;
 mod layout;
 mod parser;
+mod pdf;
 mod renderer;
 mod theme;
 
@@ -29,7 +31,7 @@ use ratatui::crossterm::style::{
     SetBackgroundColor, ResetColor, Print,
 };
 
-use crate::app::App;
+use crate::app::{App, THEME_CYCLE};
 use crate::cli::Cli;
 use crate::images::ImageManager;
 use crate::layout::DocumentLine;
@@ -205,7 +207,7 @@ fn main() -> color_eyre::Result<()> {
         p
     };
 
-    let mut image_manager = ImageManager::new(base_path, picker, cols, no_images, ascii_images);
+    let mut image_manager = ImageManager::new(base_path.clone(), picker, cols, no_images, ascii_images);
 
     // Parse markdown into IR blocks. Kept mutable so refresh can re-parse.
     let mut blocks = parser::parse(&source, &highlighter, &mut image_manager, &theme);
@@ -219,7 +221,7 @@ fn main() -> color_eyre::Result<()> {
     }
 
     // Create the application state.
-    let mut app = App::new(document, display_name, theme);
+    let mut app = App::new(document, display_name, theme, base_path);
 
     // Initialize the terminal (enters raw mode + alternate screen).
     // TERMINAL_ACTIVE must be set immediately after so the panic hook is correct.
@@ -251,6 +253,9 @@ fn main() -> color_eyre::Result<()> {
         None
     };
 
+    // Resolve PDF font override: --pdf-font > config.pdf_font.
+    let pdf_font_override = cli.pdf_font.or(config.pdf_font);
+
     // Main event loop.
     let result = run_event_loop(
         &mut terminal,
@@ -261,6 +266,7 @@ fn main() -> color_eyre::Result<()> {
         &highlighter,
         no_color,
         stream_rx,
+        pdf_font_override,
     );
 
     // Always restore the terminal, even if the loop returned an error.
@@ -471,6 +477,45 @@ fn compute_content_width(cols: u16, app: &App) -> u16 {
     }
 }
 
+/// Computes the PDF output path from the source directory and display filename.
+///
+/// For regular files: replaces the `.md` extension with `.pdf`.
+/// For stdin/URL inputs: falls back to `./output.pdf`.
+fn compute_pdf_path(source_dir: &Path, display_name: &str) -> PathBuf {
+    if display_name.starts_with('<') || display_name.starts_with("http") {
+        return PathBuf::from("output.pdf");
+    }
+    let stem = Path::new(display_name)
+        .file_stem()
+        .unwrap_or(std::ffi::OsStr::new("output"));
+    let mut name = stem.to_os_string();
+    name.push(".pdf");
+    source_dir.join(name)
+}
+
+/// Opens a file with the system's default viewer.
+///
+/// Uses `xdg-open` on Linux, `open` on macOS, `start` on Windows.
+/// Errors are silently ignored (best-effort).
+fn open_with_system_viewer(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "start";
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let cmd = "xdg-open";
+
+    std::process::Command::new(cmd)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 /// Runs the TUI event loop until the user quits or an error occurs.
 ///
 /// Separated from `main()` so that `ratatui::restore()` always runs
@@ -486,6 +531,7 @@ fn run_event_loop(
     highlighter: &highlight::Highlighter,
     no_color: bool,
     stream_rx: Option<mpsc::Receiver<String>>,
+    pdf_font_override: Option<String>,
 ) -> color_eyre::Result<()> {
     let mut cols = terminal.size()?.width;
     let mut streaming_done = stream_rx.is_none();
@@ -496,6 +542,8 @@ fn run_event_loop(
 
         // Draw the current frame.
         terminal.draw(|frame| renderer::draw(frame, app, image_manager))?;
+        // Clear transient status message after it has been rendered once.
+        app.status_message = None;
 
         // When streaming, poll with timeout so we can check for new data;
         // otherwise block until the next event arrives.
@@ -555,6 +603,68 @@ fn run_event_loop(
         match event {
             Event::Key(key) => {
                 app.handle_key(key);
+                // Print preview toggle: load/unload the "print" theme.
+                if app.print_preview_changed {
+                    app.print_preview_changed = false;
+                    let theme_name = if app.print_preview {
+                        "print"
+                    } else {
+                        app.theme_index = app.saved_theme_index;
+                        THEME_CYCLE[app.saved_theme_index]
+                    };
+                    if let Ok(mut new_theme) = theme::load_theme(theme_name) {
+                        if no_color {
+                            new_theme.strip_colors();
+                        }
+                        app.theme = new_theme;
+                        let size = terminal.size()?;
+                        cols = size.width;
+                        app.viewport_height = size.height.saturating_sub(1) as usize;
+                        image_manager.update_max_width(cols);
+                        image_manager.clear_protocols();
+                        *blocks = parser::parse(source, highlighter, image_manager, &app.theme);
+                        let w = compute_content_width(cols, app);
+                        app.document = layout::flatten(blocks, w, &app.theme);
+                        let max = app.max_scroll();
+                        if app.scroll_offset > max {
+                            app.scroll_offset = max;
+                        }
+                    }
+                }
+                // PDF export (only meaningful in print preview).
+                if app.pdf_export_requested {
+                    app.pdf_export_requested = false;
+                    // Resolve terminal font for PDF embedding.
+                    let resolved = font_detect::detect_and_resolve(
+                        pdf_font_override.as_deref(),
+                    );
+                    let ratio = resolved
+                        .as_ref()
+                        .and_then(|r| font_detect::monospace_width_ratio(&r.regular))
+                        .unwrap_or(0.6);
+                    // Re-flatten at the PDF's column width so lines wrap to fit the page.
+                    let pdf_cols = pdf::usable_columns_for_ratio(ratio);
+                    let pdf_doc = layout::flatten(blocks, pdf_cols, &app.theme);
+                    let pdf_path = compute_pdf_path(&app.source_path, &app.filename);
+                    match pdf::export_pdf(&pdf_doc.lines, &pdf_path, resolved.as_ref(), ratio) {
+                        Ok(()) => {
+                            app.status_message =
+                                Some(format!("Exported: {} | o:open", pdf_path.display()));
+                            app.last_exported_pdf = Some(pdf_path);
+                        }
+                        Err(e) => {
+                            app.status_message =
+                                Some(format!("PDF error: {e}"));
+                        }
+                    }
+                }
+                // Open the last exported PDF with the system viewer.
+                if app.open_pdf_requested {
+                    app.open_pdf_requested = false;
+                    if let Some(pdf_path) = &app.last_exported_pdf {
+                        let _ = open_with_system_viewer(pdf_path);
+                    }
+                }
                 if app.theme_cycle_requested {
                     app.theme_cycle_requested = false;
                     let next_name = app.next_theme_name();

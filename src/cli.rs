@@ -83,4 +83,8 @@ pub struct Cli {
     /// Print rendered output to stdout (no TUI) and exit.
     #[arg(long)]
     pub print: bool,
+
+    /// Font family for PDF export (overrides terminal auto-detection).
+    #[arg(long = "pdf-font")]
+    pub pdf_font: Option<String>,
 }

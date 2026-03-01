@@ -705,6 +705,7 @@ pub fn load_theme(name_or_path: &str) -> Result<MarkdownTheme, ThemeError> {
         "dark" => return parse_and_sanitize(include_str!("dark.json")),
         "light" => return parse_and_sanitize(include_str!("light.json")),
         "dracula" => return parse_and_sanitize(include_str!("dracula.json")),
+        "print" => return parse_and_sanitize(include_str!("print.json")),
         _ => {}
     }
 

@@ -16,6 +16,7 @@ pub struct Config {
     pub no_images: Option<bool>,
     pub ascii_images: Option<bool>,
     pub no_color: Option<bool>,
+    pub pdf_font: Option<String>,
 }
 
 /// Loads the config file, returning defaults on any failure.

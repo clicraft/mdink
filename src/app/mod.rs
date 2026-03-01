@@ -54,7 +54,7 @@ pub struct FileBrowserState {
 }
 
 /// Built-in theme names, in cycling order.
-const THEME_CYCLE: &[&str] = &["dark", "light", "dracula"];
+pub const THEME_CYCLE: &[&str] = &["dark", "light", "dracula"];
 
 /// Application state for the TUI viewer.
 ///
@@ -96,6 +96,22 @@ pub struct App {
     pub file_browser: Option<FileBrowserState>,
     /// Set when user selects a file in the browser; main.rs reads and clears this.
     pub file_selected: Option<PathBuf>,
+    /// Whether print preview mode is active (white-bg print theme).
+    pub print_preview: bool,
+    /// When true, the event loop should load or unload the print theme.
+    pub print_preview_changed: bool,
+    /// Theme index saved before entering print preview (to restore on exit).
+    pub saved_theme_index: usize,
+    /// When true, the event loop should export the document as PDF.
+    pub pdf_export_requested: bool,
+    /// Directory of the source file (for PDF output placement).
+    pub source_path: PathBuf,
+    /// Transient status message shown in the status bar for one frame.
+    pub status_message: Option<String>,
+    /// Path of the last successfully exported PDF (enables "o:open" hint).
+    pub last_exported_pdf: Option<PathBuf>,
+    /// When true, the event loop should open the last exported PDF.
+    pub open_pdf_requested: bool,
 }
 
 impl App {
@@ -103,7 +119,12 @@ impl App {
     ///
     /// Scroll starts at the top; viewport height is set to 0 and must
     /// be updated by `main.rs` before each draw call.
-    pub fn new(document: PreRenderedDocument, filename: String, theme: MarkdownTheme) -> Self {
+    pub fn new(
+        document: PreRenderedDocument,
+        filename: String,
+        theme: MarkdownTheme,
+        source_path: PathBuf,
+    ) -> Self {
         let theme_index = THEME_CYCLE
             .iter()
             .position(|&n| n == theme.name)
@@ -125,6 +146,14 @@ impl App {
             search: None,
             file_browser: None,
             file_selected: None,
+            print_preview: false,
+            print_preview_changed: false,
+            saved_theme_index: theme_index,
+            pdf_export_requested: false,
+            source_path,
+            status_message: None,
+            last_exported_pdf: None,
+            open_pdf_requested: false,
         }
     }
 
@@ -213,6 +242,10 @@ impl App {
 
         // Priority 4: Normal keys.
         match key.code {
+            // Open last exported PDF (only when one exists in print preview)
+            KeyCode::Char('o') if self.print_preview && self.last_exported_pdf.is_some() => {
+                self.open_pdf_requested = true;
+            }
             // Enter search mode
             KeyCode::Char('/') => self.enter_search_mode(),
             // Toggle outline
@@ -237,8 +270,22 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => self.scroll_to_bottom(),
             // Refresh / re-render
             KeyCode::Char('r') => self.refresh_requested = true,
-            // Cycle theme
-            KeyCode::Char('t') => self.theme_cycle_requested = true,
+            // Cycle theme (suppressed during print preview)
+            KeyCode::Char('t') if !self.print_preview => {
+                self.theme_cycle_requested = true;
+            }
+            // Toggle print preview
+            KeyCode::Char('p') => {
+                self.print_preview = !self.print_preview;
+                if self.print_preview {
+                    self.saved_theme_index = self.theme_index;
+                }
+                self.print_preview_changed = true;
+            }
+            // Export PDF (only in print preview)
+            KeyCode::Char('y') if self.print_preview => {
+                self.pdf_export_requested = true;
+            }
             // Open file browser
             KeyCode::Char('f') => self.open_file_browser(),
             // Quit

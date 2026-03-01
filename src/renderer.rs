@@ -587,6 +587,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.scroll_offset + 1
     };
 
+    // Transient status message overrides the normal status bar for one frame.
+    if let Some(msg) = &app.status_message {
+        let status_text = format!(" {} ", msg);
+        let padded = format!("{:<width$}", status_text, width = area.width as usize);
+        let status_line = Line::from(Span::styled(padded, status_style));
+        let paragraph = Paragraph::new(status_line);
+        frame.render_widget(paragraph, status_area);
+        return;
+    }
+
     // Build hint text based on active UI mode.
     let hints = if app.file_browser.is_some() {
         "j/k:nav Enter:open Esc:close"
@@ -596,11 +606,19 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             "Tab:nav Enter:jump Esc:close"
         }
+    } else if app.print_preview && app.last_exported_pdf.is_some() {
+        "y:export-pdf o:open p:exit-preview"
+    } else if app.print_preview {
+        "y:export-pdf p:exit-preview"
     } else {
         "/:search o:outline f:files"
     };
 
-    let theme_name = &app.theme.name;
+    let theme_name = if app.print_preview {
+        "print"
+    } else {
+        &app.theme.name
+    };
     let status_text = format!(
         " {} | {}% | {}/{} | {} | t:{} ",
         app.filename, percent, current_line, total_lines, hints, theme_name

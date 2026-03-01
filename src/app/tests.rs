@@ -15,6 +15,7 @@
             make_doc(doc_lines),
             "test.md".to_string(),
             crate::theme::default_theme(),
+            PathBuf::from("."),
         );
         app.viewport_height = viewport;
         app
@@ -175,6 +176,7 @@
             make_doc_with_headings(doc_lines, headings),
             "test.md".to_string(),
             crate::theme::default_theme(),
+            PathBuf::from("."),
         );
         app.viewport_height = viewport;
         app
@@ -420,6 +422,7 @@
             make_doc_with_text(texts),
             "test.md".to_string(),
             crate::theme::default_theme(),
+            PathBuf::from("."),
         );
         app.viewport_height = viewport;
         app
