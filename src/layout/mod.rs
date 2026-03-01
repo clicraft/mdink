@@ -809,21 +809,20 @@ fn build_spans_for_range(
 /// When a URL is present, the text is wrapped in OSC 8 hyperlink escape
 /// sequences: `ESC ] 8 ; ; url ST text ESC ] 8 ; ; ST`. The URL is
 /// sanitized to strip control characters that could inject terminal escapes.
-fn make_span(text: &str, style: Style, url: Option<&str>) -> Span<'static> {
-    match url {
-        Some(u) => {
-            let safe_url = sanitize_url(u);
-            let linked = format!("\x1b]8;;{safe_url}\x1b\\{text}\x1b]8;;\x1b\\");
-            Span::styled(linked, style)
-        }
-        None => Span::styled(text.to_string(), style),
-    }
+fn make_span(text: &str, style: Style, _url: Option<&str>) -> Span<'static> {
+    // OSC 8 hyperlink escapes are disabled: ratatui's buffer treats embedded
+    // escape bytes as literal text, causing raw `]8;;` to appear on screen.
+    // Links are still styled (italic) but not clickable until ratatui adds
+    // native OSC 8 support.  See https://github.com/ratatui/ratatui/issues/1028
+    Span::styled(text.to_string(), style)
 }
 
 /// Strips control characters from a URL to prevent terminal escape injection.
 ///
 /// Removes ASCII control characters (0x00-0x1f, 0x7f) so that a malicious
 /// URL cannot inject arbitrary terminal escape sequences via OSC 8.
+/// Currently unused (OSC 8 disabled), retained for when ratatui adds native support.
+#[allow(dead_code)]
 fn sanitize_url(url: &str) -> String {
     url.chars()
         .filter(|c| !c.is_ascii_control())

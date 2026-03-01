@@ -220,6 +220,32 @@ fn main() -> color_eyre::Result<()> {
         return print_document(&document.lines, cols, &theme, no_color);
     }
 
+    // PDF export mode: export to PDF and exit without entering the TUI.
+    if cli.pdf {
+        let pdf_font_override = cli.pdf_font.or(config.pdf_font);
+        let resolved = font_detect::detect_and_resolve(pdf_font_override.as_deref());
+        // Load the print theme for PDF (matches print preview appearance).
+        let print_theme = theme::load_theme("print").unwrap_or_else(|_| theme::default_theme());
+        let pdf_blocks = parser::parse(&source, &highlighter, &mut image_manager, &print_theme);
+        let pdf_cols = pdf::usable_columns(resolved.as_ref());
+        let pdf_doc = layout::flatten(&pdf_blocks, pdf_cols, &print_theme);
+        let source_dir = Path::new(file)
+            .parent()
+            .unwrap_or(Path::new("."));
+        let pdf_path = compute_pdf_path(source_dir, file);
+        match pdf::export_pdf(&pdf_doc.lines, &pdf_path, resolved.as_ref()) {
+            Ok(()) => {
+                eprintln!("Exported: {}", pdf_path.display());
+                let _ = open_with_system_viewer(&pdf_path);
+            }
+            Err(e) => {
+                eprintln!("PDF error: {e}");
+                process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // Create the application state.
     let mut app = App::new(document, display_name, theme, base_path);
 
@@ -495,9 +521,32 @@ fn compute_pdf_path(source_dir: &Path, display_name: &str) -> PathBuf {
 
 /// Opens a file with the system's default viewer.
 ///
-/// Uses `xdg-open` on Linux, `open` on macOS, `start` on Windows.
+/// On WSL, uses `explorer.exe` with a Windows path converted via `wslpath`.
+/// On native Linux, uses `xdg-open`. On macOS, `open`. On Windows, `start`.
 /// Errors are silently ignored (best-effort).
 fn open_with_system_viewer(path: &Path) -> std::io::Result<()> {
+    // Detect WSL: check for WSL-specific interop marker.
+    if cfg!(target_os = "linux") && is_wsl() {
+        // Convert Linux path to Windows path via wslpath, then open with explorer.exe.
+        let wslpath_output = std::process::Command::new("wslpath")
+            .arg("-w")
+            .arg(path)
+            .output()?;
+        if wslpath_output.status.success() {
+            let win_path = String::from_utf8_lossy(&wslpath_output.stdout)
+                .trim()
+                .to_string();
+            std::process::Command::new("explorer.exe")
+                .arg(&win_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            return Ok(());
+        }
+        // Fall through to xdg-open if wslpath fails.
+    }
+
     #[cfg(target_os = "linux")]
     let cmd = "xdg-open";
     #[cfg(target_os = "macos")]
@@ -514,6 +563,14 @@ fn open_with_system_viewer(path: &Path) -> std::io::Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
     Ok(())
+}
+
+/// Detects whether we're running inside WSL (Windows Subsystem for Linux).
+///
+/// Checks `/proc/sys/fs/binfmt_misc/WSLInterop` which is present only in WSL.
+fn is_wsl() -> bool {
+    Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+        || std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
 
 /// Runs the TUI event loop until the user quits or an error occurs.
@@ -638,15 +695,11 @@ fn run_event_loop(
                     let resolved = font_detect::detect_and_resolve(
                         pdf_font_override.as_deref(),
                     );
-                    let ratio = resolved
-                        .as_ref()
-                        .and_then(|r| font_detect::monospace_width_ratio(&r.regular))
-                        .unwrap_or(0.6);
                     // Re-flatten at the PDF's column width so lines wrap to fit the page.
-                    let pdf_cols = pdf::usable_columns_for_ratio(ratio);
+                    let pdf_cols = pdf::usable_columns(resolved.as_ref());
                     let pdf_doc = layout::flatten(blocks, pdf_cols, &app.theme);
                     let pdf_path = compute_pdf_path(&app.source_path, &app.filename);
-                    match pdf::export_pdf(&pdf_doc.lines, &pdf_path, resolved.as_ref(), ratio) {
+                    match pdf::export_pdf(&pdf_doc.lines, &pdf_path, resolved.as_ref()) {
                         Ok(()) => {
                             app.status_message =
                                 Some(format!("Exported: {} | o:open", pdf_path.display()));

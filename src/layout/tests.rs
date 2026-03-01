@@ -1136,7 +1136,9 @@
     // ── OSC 8 link layout tests ─────────────────────────────────────────
 
     #[test]
-    fn test_layout_link_url_produces_osc8_in_spans() {
+    fn test_layout_link_url_renders_plain_text() {
+        // OSC 8 is disabled (ratatui can't pass through raw escapes),
+        // so links render as plain styled text without escape sequences.
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![StyledSpan {
                 text: "click".to_string(),
@@ -1149,15 +1151,11 @@
         match &doc.lines[0] {
             DocumentLine::Text(line) => {
                 let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                assert!(
-                    full_text.contains("\x1b]8;;https://example.com\x1b\\"),
-                    "span text should contain OSC 8 open sequence"
-                );
-                assert!(
-                    full_text.contains("\x1b]8;;\x1b\\"),
-                    "span text should contain OSC 8 close sequence"
-                );
                 assert!(full_text.contains("click"), "span text should contain visible text");
+                assert!(
+                    !full_text.contains("\x1b]8"),
+                    "OSC 8 sequences should not be present (disabled)"
+                );
             }
             _ => panic!("expected Text line"),
         }
@@ -1182,7 +1180,8 @@
     }
 
     #[test]
-    fn test_layout_url_sanitized_strips_control_chars() {
+    fn test_layout_url_ignored_does_not_leak_into_text() {
+        // With OSC 8 disabled, the URL should not appear in the output at all.
         let blocks = vec![RenderedBlock::Paragraph {
             content: vec![StyledSpan {
                 text: "x".to_string(),
@@ -1194,17 +1193,172 @@
         match &doc.lines[0] {
             DocumentLine::Text(line) => {
                 let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                // The ESC control character should be stripped from the URL.
-                assert!(
-                    !full_text.contains("\x1b[31m"),
-                    "ESC sequence in URL should be broken by stripping control chars"
-                );
-                // After stripping ESC (0x1b), the URL becomes "https://evil.com/[31mred".
-                assert!(
-                    full_text.contains("https://evil.com/[31mred"),
-                    "URL with ESC stripped should be present"
-                );
+                assert_eq!(full_text, "x", "only visible text should be present");
             }
             _ => panic!("expected Text line"),
         }
+    }
+
+    // ── Escape sequence leak prevention tests ───────────────────────────
+
+    /// Helper: asserts that no span in any line contains raw escape sequences.
+    fn assert_no_escape_sequences(doc: &PreRenderedDocument) {
+        for (i, line) in doc.lines.iter().enumerate() {
+            match line {
+                DocumentLine::Text(l) | DocumentLine::Code(l) | DocumentLine::AsciiArt(l) => {
+                    for span in &l.spans {
+                        let text = span.content.as_ref();
+                        assert!(
+                            !text.contains("\x1b]8"),
+                            "line {i}: span contains raw OSC 8 open: {text:?}"
+                        );
+                        assert!(
+                            !text.contains("]8;;"),
+                            "line {i}: span contains partial OSC 8 pattern ']8;;': {text:?}"
+                        );
+                        assert!(
+                            !text.contains("\x1b\\"),
+                            "line {i}: span contains raw ST (ESC backslash): {text:?}"
+                        );
+                    }
+                }
+                DocumentLine::Empty | DocumentLine::Rule => {}
+                DocumentLine::ImageStart { .. } | DocumentLine::ImageContinuation => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_escape_no_leak_standalone_link() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![
+                plain_span("A standalone link: "),
+                StyledSpan {
+                    text: "Rust documentation".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://doc.rust-lang.org".to_string()),
+                },
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_multiple_links() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![
+                plain_span("Links: "),
+                StyledSpan {
+                    text: "GitHub".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://github.com".to_string()),
+                },
+                plain_span(" and "),
+                StyledSpan {
+                    text: "crates.io".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://crates.io".to_string()),
+                },
+                plain_span(" and "),
+                StyledSpan {
+                    text: "docs.rs".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://docs.rs".to_string()),
+                },
+                plain_span("."),
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_link_with_bold_inside() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![
+                StyledSpan {
+                    text: "Important".to_string(),
+                    style: Style::default()
+                        .add_modifier(Modifier::ITALIC)
+                        .add_modifier(Modifier::BOLD),
+                    url: Some("https://example.com/release".to_string()),
+                },
+                StyledSpan {
+                    text: " release notes".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://example.com/release".to_string()),
+                },
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_link_with_code_inside() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![StyledSpan {
+                text: "cargo install".to_string(),
+                style: Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::ITALIC),
+                url: Some("https://doc.rust-lang.org/cargo/".to_string()),
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_bare_url_as_link_text() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![StyledSpan {
+                text: "https://example.com".to_string(),
+                style: Style::default().add_modifier(Modifier::ITALIC),
+                url: Some("https://example.com".to_string()),
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_link_wrapping_across_lines() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![
+                plain_span("Start "),
+                StyledSpan {
+                    text: "a very long link text that should wrap across lines to verify italic modifier is preserved through wrapping".to_string(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                    url: Some("https://example.com".to_string()),
+                },
+                plain_span(" end."),
+            ],
+        }];
+        let doc = flatten_default(&blocks, 40);
+        assert!(doc.total_height > 1, "should wrap to multiple lines");
+        assert_no_escape_sequences(&doc);
+    }
+
+    #[test]
+    fn test_escape_no_leak_full_font_slots_document() {
+        use std::sync::LazyLock;
+        static HL: LazyLock<crate::highlight::Highlighter> =
+            LazyLock::new(crate::highlight::Highlighter::new);
+
+        // Integration test: parse the full font-slots.md and verify no
+        // escape sequences leak into any span in the layout output.
+        let source = include_str!("../../testdata/font-slots.md");
+        let theme = crate::theme::default_theme();
+        let mut im = crate::images::ImageManager::new(
+            std::path::PathBuf::from("testdata"),
+            None,
+            80,
+            true,  // no_images — skip image loading
+            false,
+        );
+        let blocks = crate::parser::parse(source, &HL, &mut im, &theme);
+        let doc = crate::layout::flatten(&blocks, 80, &theme);
+        assert_no_escape_sequences(&doc);
     }

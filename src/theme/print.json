@@ -1,0 +1,69 @@
+{
+  "name": "print",
+  "document": { "bg": "white" },
+  "heading": [
+    { "fg": "black", "bold": true },
+    { "fg": "dark_gray", "bold": true },
+    { "fg": "dark_gray", "bold": true, "italic": true },
+    { "fg": "dark_gray", "italic": true },
+    { "fg": "dark_gray", "italic": true },
+    { "fg": "dark_gray", "italic": true }
+  ],
+  "code_block": {
+    "bg": "255",
+    "label_fg": "240",
+    "label_bg": "255",
+    "label_italic": true
+  },
+  "code_inline": {
+    "fg": "black",
+    "bg": "255",
+    "bold": true
+  },
+  "emphasis": { "italic": true },
+  "strong": { "bold": true },
+  "strikethrough": { "strikethrough": true },
+  "link": { "fg": "blue", "underline": true },
+  "image_alt": { "dim": true },
+  "block_quote": {
+    "prefix": "│ ",
+    "italic": true,
+    "dim": true
+  },
+  "thematic_break": {
+    "char": "─",
+    "dim": true
+  },
+  "list": {
+    "bullet": ["•", "◦", "▪"],
+    "task_checked": "☑",
+    "task_unchecked": "☐",
+    "indent_size": 2
+  },
+  "table": {
+    "header_bold": true,
+    "border_dim": true
+  },
+  "outline": {
+    "fg": "dark_gray",
+    "selected_fg": "white",
+    "selected_bg": "black",
+    "border_fg": "240",
+    "h1_fg": "black",
+    "h2_fg": "dark_gray",
+    "h3_fg": "dark_gray",
+    "width_percent": 25
+  },
+  "status_bar": {
+    "fg": "white",
+    "bg": "black",
+    "bold": true
+  },
+  "search": {
+    "match_fg": "black",
+    "match_bg": "yellow",
+    "focused_fg": "white",
+    "focused_bg": "blue"
+  },
+  "syntect_theme": "InspiredGitHub"
+}

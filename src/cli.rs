@@ -87,4 +87,8 @@ pub struct Cli {
     /// Font family for PDF export (overrides terminal auto-detection).
     #[arg(long = "pdf-font")]
     pub pdf_font: Option<String>,
+
+    /// Export to PDF and exit (no TUI). Output path defaults to <input>.pdf.
+    #[arg(long)]
+    pub pdf: bool,
 }

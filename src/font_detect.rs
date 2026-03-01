@@ -5,6 +5,26 @@
 //! Detects the terminal's configured font family from config files, resolves
 //! font family names to TTF file paths via `fc-match`, and reads monospace
 //! glyph metrics from TTF files for accurate PDF character width calculation.
+//!
+//! ## Font resolution cascade
+//!
+//! ```text
+//! --pdf-font "Family"  →  all 4 slots use that family
+//!         ↓ (not set)
+//! TERM_PROGRAM / env vars  →  probe matching terminal's config only
+//!         ↓ (no match)
+//! JetBrains Mono  →  default (WezTerm's built-in font)
+//!         ↓ (not installed)
+//! Courier  →  built-in PDF font (last resort, in pdf.rs)
+//! ```
+//!
+//! ## Important: only probe the running terminal
+//!
+//! `detect_terminal_font()` must NOT blindly probe all config files on disk.
+//! On WSL, config files from multiple terminals coexist (e.g. an Alacritty
+//! config with Iosevka/Victor Mono alongside WezTerm running JetBrains Mono).
+//! Probing by env var (`TERM_PROGRAM`, `WEZTERM_PANE`, `KITTY_PID`, etc.)
+//! ensures we only read the config of the terminal that is actually running.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,18 +47,37 @@ pub struct ResolvedFonts {
     pub bold_italic: Option<PathBuf>,
 }
 
-/// Full pipeline: CLI override > config > terminal auto-detect > None.
+/// WezTerm's default font, used as the final fallback when no terminal
+/// config is detected. Most modern terminals ship JetBrains Mono or have
+/// it installed, making it a better PDF default than Courier.
+const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
+
+/// Full pipeline: CLI override > config > terminal auto-detect > JetBrains Mono.
+///
+/// The default fallback explicitly names JetBrains Mono for all four slots
+/// so that `fc-match` resolves Regular, Bold, Italic, and BoldItalic variants
+/// — matching WezTerm's built-in default font exactly.
 pub fn detect_and_resolve(pdf_font: Option<&str>) -> Option<ResolvedFonts> {
     let fonts = match pdf_font {
         Some(family) => TerminalFonts {
             normal: family.to_string(),
-            bold: None,
-            italic: None,
-            bold_italic: None,
+            bold: Some(family.to_string()),
+            italic: Some(family.to_string()),
+            bold_italic: Some(family.to_string()),
         },
-        None => detect_terminal_font()?,
+        None => detect_terminal_font().unwrap_or_else(default_fonts),
     };
     resolve_font_family(&fonts)
+}
+
+/// Returns `TerminalFonts` with JetBrains Mono for all four slots.
+fn default_fonts() -> TerminalFonts {
+    TerminalFonts {
+        normal: DEFAULT_FONT_FAMILY.to_string(),
+        bold: Some(DEFAULT_FONT_FAMILY.to_string()),
+        italic: Some(DEFAULT_FONT_FAMILY.to_string()),
+        bold_italic: Some(DEFAULT_FONT_FAMILY.to_string()),
+    }
 }
 
 /// Read monospace width ratio from a TTF file (advance_width / units_per_em).
@@ -61,27 +100,55 @@ pub fn monospace_width_ratio(path: &Path) -> Option<f32> {
 
 /// Detects the terminal's font configuration by checking TERM_PROGRAM
 /// and terminal-specific env vars.
+///
+/// Only probes config files for the terminal that is actually running.
+/// Blindly probing all config files would pick up stale configs from
+/// terminals that are installed but not in use (e.g. Alacritty config
+/// found on WSL while WezTerm is the active terminal).
 fn detect_terminal_font() -> Option<TerminalFonts> {
     let term = std::env::var("TERM_PROGRAM").ok().unwrap_or_default();
 
-    match term.as_str() {
+    // Direct match on TERM_PROGRAM.
+    let result = match term.as_str() {
         "kitty" => detect_kitty(),
         "Alacritty" | "alacritty" => detect_alacritty(),
         "WezTerm" => detect_wezterm(),
         "ghostty" => detect_ghostty(),
-        _ => {
-            // Fall back to terminal-specific env vars.
-            if std::env::var("KITTY_PID").is_ok() {
-                detect_kitty()
-            } else if std::env::var("WEZTERM_PANE").is_ok() {
-                detect_wezterm()
-            } else if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() {
-                detect_ghostty()
-            } else {
-                None
-            }
+        _ => None,
+    };
+    if result.is_some() {
+        return result;
+    }
+
+    // Fall back to terminal-specific env vars.
+    if std::env::var("KITTY_PID").is_ok() {
+        if let Some(f) = detect_kitty() {
+            return Some(f);
         }
     }
+    if std::env::var("WEZTERM_PANE").is_ok() {
+        if let Some(f) = detect_wezterm() {
+            return Some(f);
+        }
+    }
+    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() {
+        if let Some(f) = detect_ghostty() {
+            return Some(f);
+        }
+    }
+    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() || std::env::var("COLORTERM").ok().as_deref() == Some("alacritty") {
+        if let Some(f) = detect_alacritty() {
+            return Some(f);
+        }
+    }
+    if std::env::var("WT_SESSION").is_ok() {
+        if let Some(f) = detect_windows_terminal() {
+            return Some(f);
+        }
+    }
+
+    // No terminal identified — caller falls back to default_fonts().
+    None
 }
 
 fn detect_kitty() -> Option<TerminalFonts> {
@@ -91,11 +158,22 @@ fn detect_kitty() -> Option<TerminalFonts> {
 }
 
 fn detect_alacritty() -> Option<TerminalFonts> {
+    // Linux/macOS path.
     let config_dir = dirs::config_dir()?;
-    // Alacritty checks alacritty.toml first, then alacritty.yml (legacy).
     let path = config_dir.join("alacritty").join("alacritty.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    parse_alacritty_content(&content)
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Some(fonts) = parse_alacritty_content(&content) {
+            return Some(fonts);
+        }
+    }
+    // WSL: check Windows-side %APPDATA%/alacritty/alacritty.toml.
+    if let Some(appdata) = wsl_appdata_dir() {
+        let path = appdata.join("alacritty").join("alacritty.toml");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return parse_alacritty_content(&content);
+        }
+    }
+    None
 }
 
 fn detect_wezterm() -> Option<TerminalFonts> {
@@ -108,6 +186,73 @@ fn detect_ghostty() -> Option<TerminalFonts> {
     let path = dirs::config_dir()?.join("ghostty").join("config");
     let content = std::fs::read_to_string(path).ok()?;
     parse_ghostty_content(&content)
+}
+
+/// Detects font from Windows Terminal settings.json (WSL only).
+fn detect_windows_terminal() -> Option<TerminalFonts> {
+    let localappdata = wsl_localappdata_dir()?;
+    // Windows Terminal stores settings in a package directory.
+    let packages = localappdata.join("Packages");
+    let entries = std::fs::read_dir(&packages).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("Microsoft.WindowsTerminal") {
+            let settings = entry
+                .path()
+                .join("LocalState")
+                .join("settings.json");
+            if let Ok(content) = std::fs::read_to_string(&settings) {
+                if let Some(fonts) = parse_windows_terminal_content(&content) {
+                    return Some(fonts);
+                }
+            }
+        }
+    }
+    None
+}
+
+// ── WSL interop helpers ───────────────────────────────────────────────
+
+/// Returns the Windows %APPDATA% directory as a WSL path.
+fn wsl_appdata_dir() -> Option<PathBuf> {
+    wsl_env_dir("APPDATA")
+}
+
+/// Returns the Windows %LOCALAPPDATA% directory as a WSL path.
+fn wsl_localappdata_dir() -> Option<PathBuf> {
+    wsl_env_dir("LOCALAPPDATA")
+}
+
+/// Reads a Windows environment variable via cmd.exe and converts to a WSL path.
+fn wsl_env_dir(var: &str) -> Option<PathBuf> {
+    let output = Command::new("cmd.exe")
+        .args(["/C", &format!("echo %{var}%")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let win_path = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_string();
+    if win_path.is_empty() || win_path.contains('%') {
+        return None;
+    }
+    let wsl_output = Command::new("wslpath")
+        .arg(&win_path)
+        .output()
+        .ok()?;
+    if !wsl_output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&wsl_output.stdout)
+        .trim()
+        .to_string();
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 // ── Config parsers (take &str for testability) ────────────────────────
@@ -259,6 +404,41 @@ fn extract_quoted_after(s: &str) -> Option<String> {
     Some(family)
 }
 
+fn parse_windows_terminal_content(content: &str) -> Option<TerminalFonts> {
+    // Windows Terminal settings.json has:
+    //   profiles.defaults.font.face = "FontName"
+    //   profiles.list[].font.face = "FontName"
+    // We check defaults first, then the active profile.
+    let val: serde_json::Value = serde_json::from_str(content).ok()?;
+    let profiles = val.get("profiles")?;
+
+    // Check defaults.
+    let face = profiles
+        .get("defaults")
+        .and_then(|d| d.get("font"))
+        .and_then(|f| f.get("face"))
+        .and_then(|f| f.as_str());
+
+    // If no default font, check each profile in the list.
+    let face = face.or_else(|| {
+        profiles
+            .get("list")
+            .and_then(|list| list.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .filter_map(|p| p.get("font")?.get("face")?.as_str())
+                    .next()
+            })
+    })?;
+
+    Some(TerminalFonts {
+        normal: face.to_string(),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    })
+}
+
 fn parse_ghostty_content(content: &str) -> Option<TerminalFonts> {
     let mut normal = None;
     let mut bold = None;
@@ -298,22 +478,28 @@ fn parse_ghostty_content(content: &str) -> Option<TerminalFonts> {
 
 // ── Font resolution via fc-match ──────────────────────────────────────
 
+/// Public wrapper for tests that need to resolve specific TerminalFonts directly.
+#[cfg(test)]
+pub fn resolve_font_family_pub(fonts: &TerminalFonts) -> Option<ResolvedFonts> {
+    resolve_font_family(fonts)
+}
+
 /// Resolves a `TerminalFonts` to TTF file paths using `fc-match`.
 fn resolve_font_family(fonts: &TerminalFonts) -> Option<ResolvedFonts> {
     let regular = fc_match_font(&fonts.normal, false, false)?;
 
     let bold = match &fonts.bold {
-        Some(family) => fc_match_font(family, false, false),
+        Some(family) => fc_match_font(family, true, false),
         None => fc_match_font(&fonts.normal, true, false),
     };
 
     let italic = match &fonts.italic {
-        Some(family) => fc_match_font(family, false, false),
+        Some(family) => fc_match_font(family, false, true),
         None => fc_match_font(&fonts.normal, false, true),
     };
 
     let bold_italic = match &fonts.bold_italic {
-        Some(family) => fc_match_font(family, false, false),
+        Some(family) => fc_match_font(family, true, true),
         None => fc_match_font(&fonts.normal, true, true),
     };
 
@@ -521,6 +707,46 @@ return config
     }
 
     #[test]
+    fn test_parse_windows_terminal_defaults_font() {
+        let content = r#"{
+            "profiles": {
+                "defaults": {
+                    "font": { "face": "Cascadia Code", "size": 12 }
+                },
+                "list": []
+            }
+        }"#;
+        let fonts = parse_windows_terminal_content(content).unwrap();
+        assert_eq!(fonts.normal, "Cascadia Code");
+    }
+
+    #[test]
+    fn test_parse_windows_terminal_profile_font() {
+        let content = r#"{
+            "profiles": {
+                "defaults": {},
+                "list": [
+                    { "name": "PowerShell", "font": { "face": "JetBrains Mono" } },
+                    { "name": "CMD" }
+                ]
+            }
+        }"#;
+        let fonts = parse_windows_terminal_content(content).unwrap();
+        assert_eq!(fonts.normal, "JetBrains Mono");
+    }
+
+    #[test]
+    fn test_parse_windows_terminal_no_font() {
+        let content = r#"{
+            "profiles": {
+                "defaults": {},
+                "list": [{ "name": "PowerShell" }]
+            }
+        }"#;
+        assert!(parse_windows_terminal_content(content).is_none());
+    }
+
+    #[test]
     fn test_extract_quoted_after_parens() {
         assert_eq!(
             extract_quoted_after("(\"Hello\")"),
@@ -577,5 +803,122 @@ return config
     #[test]
     fn test_monospace_width_ratio_nonexistent_file() {
         assert!(monospace_width_ratio(Path::new("/nonexistent.ttf")).is_none());
+    }
+
+    #[test]
+    fn test_resolve_produces_four_distinct_paths() {
+        // Skip if fc-match unavailable.
+        if Command::new("fc-match").arg("--version").output().is_err() {
+            return;
+        }
+
+        let fonts = TerminalFonts {
+            normal: "DejaVu Sans Mono".to_string(),
+            bold: None,
+            italic: None,
+            bold_italic: None,
+        };
+        let Some(resolved) = resolve_font_family(&fonts) else {
+            return; // font not installed, skip
+        };
+
+        // All four paths should be present and distinct.
+        let bold = resolved.bold.as_ref().expect("bold should resolve");
+        let italic = resolved.italic.as_ref().expect("italic should resolve");
+        let bi = resolved.bold_italic.as_ref().expect("bold_italic should resolve");
+
+        assert_ne!(&resolved.regular, bold, "regular and bold should differ");
+        assert_ne!(&resolved.regular, italic, "regular and italic should differ");
+        assert_ne!(&resolved.regular, bi, "regular and bold_italic should differ");
+        assert_ne!(bold, italic, "bold and italic should differ");
+    }
+
+    #[test]
+    fn test_resolve_with_per_slot_families() {
+        // Simulates a terminal config with different families per slot
+        // (like the font slot strategy: JetBrains for normal, different for bold).
+        if Command::new("fc-match").arg("--version").output().is_err() {
+            return;
+        }
+
+        let fonts = TerminalFonts {
+            normal: "DejaVu Sans Mono".to_string(),
+            bold: Some("DejaVu Sans".to_string()),  // non-mono, different family
+            italic: None,
+            bold_italic: None,
+        };
+        let Some(resolved) = resolve_font_family(&fonts) else {
+            return;
+        };
+
+        let bold = resolved.bold.as_ref().expect("bold should resolve");
+        // When bold has an explicit family, fc_match_font requests weight=bold
+        // from that family — matching what terminals like Alacritty do.
+        assert_ne!(&resolved.regular, bold, "different family should give different path");
+    }
+
+    #[test]
+    fn test_resolve_four_slot_fonts() {
+        // Tests the exact 4-font config from the font slot strategy:
+        // normal=JetBrains Mono, bold=Iosevka, italic=Victor Mono, bold_italic=Fira Code.
+        if Command::new("fc-match").arg("--version").output().is_err() {
+            return;
+        }
+
+        let fonts = TerminalFonts {
+            normal: "JetBrains Mono".to_string(),
+            bold: Some("Iosevka".to_string()),
+            italic: Some("Victor Mono".to_string()),
+            bold_italic: Some("Fira Code".to_string()),
+        };
+        let Some(resolved) = resolve_font_family(&fonts) else {
+            return; // fonts not installed, skip
+        };
+
+        let bold = resolved.bold.as_ref().expect("bold should resolve");
+        let italic = resolved.italic.as_ref().expect("italic should resolve");
+        let bi = resolved.bold_italic.as_ref().expect("bold_italic should resolve");
+
+        // All four should be distinct font files.
+        let paths = [&resolved.regular, bold, italic, bi];
+        for (i, a) in paths.iter().enumerate() {
+            for (j, b) in paths.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "slot {i} and {j} should have different font files");
+                }
+            }
+        }
+
+        // Verify the filenames match expected families.
+        let reg_name = resolved.regular.file_name().unwrap().to_string_lossy();
+        assert!(
+            reg_name.contains("JetBrains") || reg_name.contains("jetbrains"),
+            "regular should be JetBrains Mono, got {reg_name}"
+        );
+    }
+
+    #[test]
+    fn test_parse_alacritty_four_slot_fonts() {
+        let content = r#"
+[terminal.shell]
+program = "wsl.exe"
+
+[font.normal]
+family = "JetBrains Mono"
+
+[font.bold]
+family = "Iosevka"
+
+[font.italic]
+family = "Victor Mono"
+
+[font.bold_italic]
+family = "Fira Code"
+"#;
+        let fonts = parse_alacritty_content(content).unwrap();
+        assert_eq!(fonts.normal, "JetBrains Mono");
+        assert_eq!(fonts.bold.as_deref(), Some("Iosevka"));
+        assert_eq!(fonts.italic.as_deref(), Some("Victor Mono"));
+        assert_eq!(fonts.bold_italic.as_deref(), Some("Fira Code"));
     }
 }

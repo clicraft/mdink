@@ -131,6 +131,20 @@ and ***bold italic*** — all in one line.
 
 ---
 
+## Hyperlinks
+
+A standalone link: [Rust documentation](https://doc.rust-lang.org)
+
+Multiple links in a row: [GitHub](https://github.com) and [crates.io](https://crates.io) and [docs.rs](https://docs.rs).
+
+Link with **bold inside**: [**Important** release notes](https://example.com/release)
+
+Link with `code inside`: [`cargo install`](https://doc.rust-lang.org/cargo/)
+
+A bare URL as link text: [https://example.com](https://example.com)
+
+---
+
 ## Wrap Stress Test
 
 This paragraph has a [very long link text that should wrap across multiple terminal lines to verify that the italic modifier applied by the link style stack entry is preserved through the byte-to-style map in wrap_styled_spans](https://example.com) and back to normal after.

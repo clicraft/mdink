@@ -36,6 +36,8 @@ No stage imports from a later stage. The `Highlighter` from `highlight.rs` is pa
 | `layout.rs` | `&[RenderedBlock]` + width | display-ready lines | `PreRenderedDocument` |
 | `renderer.rs` | `&App` | writes to frame | — |
 | `app.rs` | keyboard events | scroll state mutation | `App` |
+| `font_detect.rs` | env vars + config files | TTF file paths | `ResolvedFonts` |
+| `pdf.rs` | `&[DocumentLine]` + fonts | PDF file on disk | — |
 
 ### `RenderedBlock` — the IR
 
@@ -74,6 +76,20 @@ Modern terminals (WezTerm, Kitty, Alacritty) allow a different font per ANSI mod
 
 Code block comments are forced to `ITALIC` via a color-matching heuristic: `resolve_comment_color()` reads the `comment` scope's color from the syntect theme once, then any token whose foreground matches that color gets `ITALIC` added.
 
+### PDF export and font embedding
+
+`pdf.rs` exports the document as a text-mode PDF using `printpdf` 0.7. Font handling has two critical workarounds:
+
+**1. printpdf font descriptor bug.** printpdf 0.7 sets `Flags 32` (Nonsymbolic) and `ItalicAngle 0` for ALL embedded fonts, even italic variants. PDF viewers use these descriptors to decide whether to use the embedded font or substitute a system font. Without `FixedPitch` (bit 0) and `Italic` (bit 6), viewers like Adobe Reader substitute a proportional serif font for italic slots. `fix_font_descriptors()` post-processes the raw PDF bytes to patch:
+- F0/F1 (Regular/Bold): `Flags 33` (FixedPitch + Nonsymbolic)
+- F2/F3 (Italic/BoldItalic): `Flags 97` (FixedPitch + Nonsymbolic + Italic)
+
+These are same-length byte replacements ("32"→"33"/"97"), so no PDF structure offsets change.
+
+**2. Terminal font detection must not blindly probe all configs.** On WSL, config files from multiple terminals coexist. The old code probed every config file on disk as a "last resort", which picked up an Alacritty config with Iosevka/Victor Mono while WezTerm was the running terminal. `detect_terminal_font()` now only probes configs when an env var confirms the terminal is running (`TERM_PROGRAM`, `WEZTERM_PANE`, `KITTY_PID`, `ALACRITTY_WINDOW_ID`, `WT_SESSION`, etc.). When none match, it falls back to JetBrains Mono (WezTerm's default).
+
+**Font cascade:** `--pdf-font` > terminal config > JetBrains Mono > Courier (built-in).
+
 ### Invariants to preserve
 
 - **Highlight size guard:** `highlight.rs` rejects code blocks > 512 KB (Oniguruma can OOM on large inputs).
@@ -82,6 +98,9 @@ Code block comments are forced to `ITALIC` via a color-matching heuristic: `reso
 - **Style stack:** `parser.rs` pushes a `Style` for each inline format open tag and pops it on the matching close tag. All pop sites have `debug_assert!(!style_stack.is_empty())`.
 - **Terminal restore:** `TERMINAL_ACTIVE` flag in `main.rs` ensures the panic hook only restores the terminal if it was successfully initialized. Never remove this flag.
 - **Leaf module:** `highlight.rs` never imports from other mdink modules. syntect types must not leak into parser, layout, or renderer.
+- **Leaf module:** `font_detect.rs` never imports from other mdink modules. Same isolation as `highlight.rs`.
+- **PDF font descriptors:** `fix_font_descriptors()` must run after `doc.save()` to patch printpdf's broken Flags. If printpdf is upgraded, verify whether this workaround is still needed.
+- **Terminal detection:** `detect_terminal_font()` must only probe config files for terminals confirmed by env vars. Never blindly probe all configs — on WSL, stale configs from other terminals cause wrong font embedding.
 
 ### Resize handling
 
