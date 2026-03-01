@@ -32,6 +32,8 @@ image = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
+# Phase 6
+ureq = "3"
 
 # ── Release profile ──────────────────────────────────────────────
 [profile.release]

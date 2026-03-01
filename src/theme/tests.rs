@@ -640,3 +640,48 @@ fn test_strip_colors_preserves_modifiers() {
     // Syntect theme cleared (signals no highlighting).
     assert!(theme.syntect_theme.is_empty());
 }
+
+// ── Search style tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_search_match_style_default() {
+    let s = SearchStyle::default();
+    let style = search_match_style(&s);
+    assert_eq!(style.fg, Some(Color::Black));
+    assert_eq!(style.bg, Some(Color::Yellow));
+}
+
+#[test]
+fn test_search_focused_style_default() {
+    let s = SearchStyle::default();
+    let style = search_focused_style(&s);
+    assert_eq!(style.fg, Some(Color::Black));
+    assert_eq!(style.bg, Some(Color::LightCyan));
+}
+
+#[test]
+fn test_strip_colors_clears_search() {
+    let mut theme = default_theme();
+    theme.strip_colors();
+    assert!(theme.search.match_fg.is_none());
+    assert!(theme.search.match_bg.is_none());
+    assert!(theme.search.focused_fg.is_none());
+    assert!(theme.search.focused_bg.is_none());
+}
+
+#[test]
+fn test_search_style_roundtrip() {
+    let original = default_theme();
+    let json = serde_json::to_string_pretty(&original).expect("serialize");
+    let roundtripped: MarkdownTheme = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        search_match_style(&roundtripped.search),
+        search_match_style(&original.search),
+        "search match style roundtrip"
+    );
+    assert_eq!(
+        search_focused_style(&roundtripped.search),
+        search_focused_style(&original.search),
+        "search focused style roundtrip"
+    );
+}

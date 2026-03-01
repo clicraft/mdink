@@ -31,6 +31,9 @@ pub struct MarkdownTheme {
     pub image_alt: InlineStyle,
     pub outline: OutlinePanelStyle,
     pub status_bar: StatusBarStyle,
+    pub search: SearchStyle,
+    pub math_inline: InlineStyle,
+    pub math_display: InlineStyle,
     pub syntect_theme: String,
 }
 
@@ -200,6 +203,27 @@ impl Default for OutlinePanelStyle {
     }
 }
 
+/// Search highlight style.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct SearchStyle {
+    pub match_fg: Option<String>,
+    pub match_bg: Option<String>,
+    pub focused_fg: Option<String>,
+    pub focused_bg: Option<String>,
+}
+
+impl Default for SearchStyle {
+    fn default() -> Self {
+        Self {
+            match_fg: Some("black".to_string()),
+            match_bg: Some("yellow".to_string()),
+            focused_fg: Some("black".to_string()),
+            focused_bg: Some("light_cyan".to_string()),
+        }
+    }
+}
+
 /// Status bar style.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -258,6 +282,9 @@ impl Default for MarkdownTheme {
             image_alt: InlineStyle { dim: true, ..Default::default() },
             outline: OutlinePanelStyle::default(),
             status_bar: StatusBarStyle::default(),
+            search: SearchStyle::default(),
+            math_inline: InlineStyle { fg: Some("light_magenta".to_string()), italic: true, ..Default::default() },
+            math_display: InlineStyle { fg: Some("light_magenta".to_string()), bold: true, ..Default::default() },
             syntect_theme: "base16-ocean.dark".to_string(),
         }
     }
@@ -361,6 +388,12 @@ impl MarkdownTheme {
         self.status_bar.fg = None;
         self.status_bar.bg = None;
 
+        // Search
+        self.search.match_fg = None;
+        self.search.match_bg = None;
+        self.search.focused_fg = None;
+        self.search.focused_bg = None;
+
         // Syntect code highlighting: empty string signals no highlighting
         // to highlight.rs, which returns plain unstyled text.
         self.syntect_theme = String::new();
@@ -376,6 +409,8 @@ impl MarkdownTheme {
         strip_inline(&mut self.strikethrough);
         strip_inline(&mut self.link);
         strip_inline(&mut self.image_alt);
+        strip_inline(&mut self.math_inline);
+        strip_inline(&mut self.math_display);
     }
 }
 
@@ -584,6 +619,22 @@ pub fn outline_border_style(o: &OutlinePanelStyle) -> Style {
 /// Background style for the outline panel area.
 pub fn outline_bg_style(o: &OutlinePanelStyle) -> Style {
     apply_color(Style::default(), &o.bg, Style::bg)
+}
+
+/// Style for a non-focused search match.
+pub fn search_match_style(s: &SearchStyle) -> Style {
+    let mut style = Style::default();
+    style = apply_color(style, &s.match_fg, Style::fg);
+    style = apply_color(style, &s.match_bg, Style::bg);
+    style
+}
+
+/// Style for the focused (current) search match.
+pub fn search_focused_style(s: &SearchStyle) -> Style {
+    let mut style = Style::default();
+    style = apply_color(style, &s.focused_fg, Style::fg);
+    style = apply_color(style, &s.focused_bg, Style::bg);
+    style
 }
 
 /// Style for the status bar.

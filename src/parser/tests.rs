@@ -1357,3 +1357,164 @@
             _ => panic!("expected Table block"),
         }
     }
+
+    // ── OSC 8 link tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parser_link_sets_url_on_spans() {
+        let blocks = parse("[click here](https://example.com)", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].text, "click here");
+                assert_eq!(
+                    content[0].url.as_deref(),
+                    Some("https://example.com"),
+                    "link span should carry the URL"
+                );
+            }
+            _ => panic!("expected Paragraph block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_plain_text_has_no_url() {
+        let blocks = parse("just text", h());
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                assert!(content[0].url.is_none(), "plain text should have no URL");
+            }
+            _ => panic!("expected Paragraph block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_link_url_cleared_after_link() {
+        let blocks = parse("[a](https://a.com) then plain", h());
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                // First span is the link text.
+                assert_eq!(content[0].url.as_deref(), Some("https://a.com"));
+                // Subsequent spans should have no URL.
+                let has_url_after = content[1..].iter().any(|s| s.url.is_some());
+                assert!(!has_url_after, "text after link should have no URL");
+            }
+            _ => panic!("expected Paragraph block"),
+        }
+    }
+
+    // ── Mermaid diagram tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_parser_mermaid_block_produces_code_block() {
+        let md = "```mermaid\ngraph TD\n  A --> B\n```";
+        let blocks = parse(md, h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::CodeBlock { language, highlighted_lines } => {
+                assert_eq!(language, "mermaid");
+                assert_eq!(highlighted_lines.len(), 2);
+                // Lines should be plain text (no syntax highlighting).
+                let first_line: String = highlighted_lines[0]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect();
+                assert_eq!(first_line, "graph TD");
+            }
+            _ => panic!("expected CodeBlock block"),
+        }
+    }
+
+    // ── LaTeX Math tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unicode_math_greek_letters() {
+        assert_eq!(super::unicode_math("\\alpha + \\beta"), "\u{03B1} + \u{03B2}");
+        assert_eq!(super::unicode_math("\\pi"), "\u{03C0}");
+        assert_eq!(super::unicode_math("\\Omega"), "\u{03A9}");
+    }
+
+    #[test]
+    fn test_unicode_math_operators() {
+        assert_eq!(super::unicode_math("\\leq"), "\u{2264}");
+        assert_eq!(super::unicode_math("\\geq"), "\u{2265}");
+        assert_eq!(super::unicode_math("\\neq"), "\u{2260}");
+        assert_eq!(super::unicode_math("\\infty"), "\u{221E}");
+        assert_eq!(super::unicode_math("\\times"), "\u{00D7}");
+    }
+
+    #[test]
+    fn test_unicode_math_superscript() {
+        assert_eq!(super::unicode_math("x^2"), "x\u{00B2}");
+        assert_eq!(super::unicode_math("x^{23}"), "x\u{00B2}\u{00B3}");
+    }
+
+    #[test]
+    fn test_unicode_math_subscript() {
+        assert_eq!(super::unicode_math("x_0"), "x\u{2080}");
+        assert_eq!(super::unicode_math("a_{12}"), "a\u{2081}\u{2082}");
+    }
+
+    #[test]
+    fn test_unicode_math_arrows() {
+        assert_eq!(super::unicode_math("\\rightarrow"), "\u{2192}");
+        assert_eq!(super::unicode_math("\\Rightarrow"), "\u{21D2}");
+        assert_eq!(super::unicode_math("\\leftarrow"), "\u{2190}");
+    }
+
+    #[test]
+    fn test_unicode_math_unrecognized_passthrough() {
+        // Unrecognized commands pass through as-is.
+        assert_eq!(super::unicode_math("\\foobar"), "\\foobar");
+    }
+
+    #[test]
+    fn test_unicode_math_escaped_chars() {
+        assert_eq!(super::unicode_math("\\{x\\}"), "{x}");
+    }
+
+    #[test]
+    fn test_unicode_math_empty_input() {
+        assert_eq!(super::unicode_math(""), "");
+    }
+
+    #[test]
+    fn test_parser_inline_math_produces_styled_span() {
+        let blocks = parse("The formula $E = mc^{2}$ is famous.", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                // Should contain spans for "The formula ", "$E = mc²$", and " is famous."
+                let full_text: String = content.iter().map(|s| s.text.as_str()).collect();
+                assert!(
+                    full_text.contains("$E = mc\u{00B2}$"),
+                    "Expected Unicode superscript in: {full_text}"
+                );
+            }
+            _ => panic!("expected Paragraph block"),
+        }
+    }
+
+    #[test]
+    fn test_parser_display_math_produces_paragraph() {
+        let blocks = parse("$$\\alpha + \\beta = \\gamma$$", h());
+        // Display math creates a separate Paragraph block.
+        assert!(!blocks.is_empty());
+        let has_math = blocks.iter().any(|b| {
+            if let RenderedBlock::Paragraph { content } = b {
+                let text: String = content.iter().map(|s| s.text.as_str()).collect();
+                text.contains("$$\u{03B1} + \u{03B2} = \u{03B3}$$")
+            } else {
+                false
+            }
+        });
+        assert!(has_math, "expected a Paragraph with display math content");
+    }
+
+    #[test]
+    fn test_math_testdata_parses_without_panic() {
+        let source = include_str!("../../testdata/math.md");
+        let _ = parse(source, h());
+    }

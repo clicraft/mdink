@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::App;
+use crate::app::{App, SearchMatch};
 use crate::images::ImageManager;
 use crate::layout::DocumentLine;
 use crate::theme;
@@ -93,9 +93,17 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                 height: 1,
             };
 
+            // Collect search matches for this line (if any).
+            let line_matches = collect_line_matches(app, line_idx);
+
             match &app.document.lines[line_idx] {
                 DocumentLine::Text(line) => {
-                    let paragraph = Paragraph::new(line.clone());
+                    let rendered = if line_matches.is_empty() {
+                        line.clone()
+                    } else {
+                        apply_search_highlights(line, &line_matches, app)
+                    };
+                    let paragraph = Paragraph::new(rendered);
                     frame.render_widget(paragraph, line_area);
                 }
                 DocumentLine::Code(line) => {
@@ -121,7 +129,11 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                             bg_style,
                         ));
                     }
-                    let code_line = Line::from(spans);
+                    let code_line = if line_matches.is_empty() {
+                        Line::from(spans)
+                    } else {
+                        apply_search_highlights(&Line::from(spans), &line_matches, app)
+                    };
                     let paragraph = Paragraph::new(code_line);
                     frame.render_widget(paragraph, line_area);
                 }
@@ -168,6 +180,11 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
     }
     if drop_down {
         draw_outline_dropdown(frame, app, content_area);
+    }
+
+    // Draw file browser overlay if active.
+    if app.file_browser.is_some() {
+        draw_file_browser(frame, app, content_area);
     }
 
     // Draw status bar at the bottom row.
@@ -431,6 +448,102 @@ fn compute_outline_scroll(
     scroll
 }
 
+// ── File browser overlay ─────────────────────────────────────────────────────
+
+/// Draws the file browser as a centered overlay popup.
+fn draw_file_browser(frame: &mut Frame, app: &App, content_area: Rect) {
+    let browser = match &app.file_browser {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Size the popup: 60% width, up to 80% height.
+    let popup_w = (content_area.width as u32 * 60 / 100).max(20).min(content_area.width as u32) as u16;
+    let popup_h = (content_area.height as u32 * 80 / 100)
+        .max(5)
+        .min(content_area.height as u32) as u16;
+
+    // Center the popup.
+    let popup_x = content_area.x + (content_area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = content_area.y + (content_area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_w,
+        height: popup_h,
+    };
+
+    // Use outline styles for consistency with the existing UI.
+    let border_style = theme::outline_border_style(&app.theme.outline);
+    let bg_style = theme::outline_bg_style(&app.theme.outline);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(bg_style)
+        .title(" Open File (Enter: open, Esc: close) ");
+    frame.render_widget(block, popup_rect);
+
+    // Inner area for file entries.
+    let inner = Rect {
+        x: popup_rect.x + 1,
+        y: popup_rect.y + 1,
+        width: popup_rect.width.saturating_sub(2),
+        height: popup_rect.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let visible_rows = inner.height as usize;
+    let total = browser.entries.len();
+
+    // Compute scroll to keep the selected entry visible.
+    let scroll = {
+        let mut s = browser.scroll;
+        if browser.selected < s {
+            s = browser.selected;
+        }
+        if browser.selected >= s + visible_rows {
+            s = browser.selected.saturating_sub(visible_rows - 1);
+        }
+        s
+    };
+
+    let selected_style = theme::outline_selected_style(&app.theme.outline);
+    let normal_style = bg_style;
+
+    for (i, entry) in browser.entries.iter().skip(scroll).enumerate() {
+        if i >= visible_rows {
+            break;
+        }
+        let idx = scroll + i;
+        let y = inner.y + i as u16;
+        let line_area = Rect { x: inner.x, y, width: inner.width, height: 1 };
+
+        let display = entry.display().to_string();
+        let padded = format!("{:<width$}", display, width = inner.width as usize);
+        let style = if idx == browser.selected { selected_style } else { normal_style };
+        let span = Span::styled(padded, style);
+        frame.render_widget(Paragraph::new(Line::from(span)), line_area);
+    }
+
+    // File count indicator at the bottom-right of the border.
+    if total > 0 {
+        let count_text = format!(" {}/{} ", browser.selected + 1, total);
+        let count_w = count_text.width();
+        if count_w < popup_rect.width as usize {
+            let count_x = popup_rect.x + popup_rect.width - count_w as u16 - 1;
+            let count_y = popup_rect.y + popup_rect.height - 1;
+            let count_area = Rect { x: count_x, y: count_y, width: count_w as u16, height: 1 };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(count_text, border_style))),
+                count_area,
+            );
+        }
+    }
+}
+
 // ── Status bar ───────────────────────────────────────────────────────────────
 
 /// Renders the status bar at the bottom row of the given area.
@@ -443,6 +556,29 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         height: 1,
     };
 
+    let status_style = theme::status_bar_style(&app.theme.status_bar);
+
+    // Search mode: show search bar instead of normal status bar.
+    if let Some(search) = &app.search {
+        let status_text = if search.active {
+            format!(" /{}_", search.query)
+        } else if search.matches.is_empty() {
+            format!(" /{} [no matches] | n:next N:prev Esc:clear", search.query)
+        } else {
+            format!(
+                " /{} [{}/{}] | n:next N:prev Esc:clear",
+                search.query,
+                search.focus + 1,
+                search.matches.len(),
+            )
+        };
+        let padded = format!("{:<width$}", status_text, width = area.width as usize);
+        let status_line = Line::from(Span::styled(padded, status_style));
+        let paragraph = Paragraph::new(status_line);
+        frame.render_widget(paragraph, status_area);
+        return;
+    }
+
     let percent = app.scroll_percent();
     let total_lines = app.document.total_height;
     let current_line = if total_lines == 0 {
@@ -451,29 +587,122 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.scroll_offset + 1
     };
 
-    // Build hint text based on outline state and mode.
-    let hints = if app.outline.is_some() {
+    // Build hint text based on active UI mode.
+    let hints = if app.file_browser.is_some() {
+        "j/k:nav Enter:open Esc:close"
+    } else if app.outline.is_some() {
         if area.width >= OUTLINE_MIN_COLS {
             "Tab:nav Enter:jump <>:size o:close"
         } else {
             "Tab:nav Enter:jump Esc:close"
         }
     } else {
-        "o:outline"
+        "/:search o:outline f:files"
     };
 
+    let theme_name = &app.theme.name;
     let status_text = format!(
-        " {} | {}% | {}/{} | {} ",
-        app.filename, percent, current_line, total_lines, hints
+        " {} | {}% | {}/{} | {} | t:{} ",
+        app.filename, percent, current_line, total_lines, hints, theme_name
     );
-
-    let status_style = theme::status_bar_style(&app.theme.status_bar);
 
     // Pad the status text to fill the entire width.
     let padded = format!("{:<width$}", status_text, width = area.width as usize);
     let status_line = Line::from(Span::styled(padded, status_style));
     let paragraph = Paragraph::new(status_line);
     frame.render_widget(paragraph, status_area);
+}
+
+// ── Search highlight helpers ──────────────────────────────────────────────────
+
+/// Collects search matches that fall on the given line index.
+///
+/// Returns references to the `SearchMatch` entries for this line,
+/// paired with whether each match is the focused one.
+fn collect_line_matches(app: &App, line_idx: usize) -> Vec<(&SearchMatch, bool)> {
+    match &app.search {
+        Some(state) if !state.matches.is_empty() => {
+            state
+                .matches
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.line_index == line_idx)
+                .map(|(i, m)| (m, i == state.focus))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Applies search match highlighting to a line's spans.
+///
+/// Algorithm:
+/// 1. Build a plain text string from all spans + a parallel array of original styles.
+/// 2. Mark byte ranges that are search matches with the highlight style.
+/// 3. Reconstruct spans, splitting at match boundaries.
+fn apply_search_highlights(
+    line: &Line<'static>,
+    matches: &[(&SearchMatch, bool)],
+    app: &App,
+) -> Line<'static> {
+    if matches.is_empty() {
+        return line.clone();
+    }
+
+    let match_style = theme::search_match_style(&app.theme.search);
+    let focused_style = theme::search_focused_style(&app.theme.search);
+
+    // Build plain text and parallel byte-to-style map from existing spans.
+    let mut plain = String::new();
+    let mut byte_styles: Vec<Style> = Vec::new();
+    for span in &line.spans {
+        let text: &str = span.content.as_ref();
+        for _ in text.bytes() {
+            byte_styles.push(span.style);
+        }
+        plain.push_str(text);
+    }
+
+    if plain.is_empty() {
+        return line.clone();
+    }
+
+    // Override styles at match ranges.
+    for &(m, is_focused) in matches {
+        let style = if is_focused { focused_style } else { match_style };
+        let start = m.byte_start.min(byte_styles.len());
+        let end = m.byte_end.min(byte_styles.len());
+        for byte_style in byte_styles.iter_mut().take(end).skip(start) {
+            *byte_style = style;
+        }
+    }
+
+    // Reconstruct spans by grouping consecutive bytes with the same style.
+    let mut result_spans: Vec<Span<'static>> = Vec::new();
+    if byte_styles.is_empty() {
+        return line.clone();
+    }
+
+    let mut run_start = 0;
+    let mut run_style = byte_styles[0];
+
+    for (i, _ch) in plain.char_indices().skip(1) {
+        if byte_styles[i] != run_style {
+            let text = &plain[run_start..i];
+            if !text.is_empty() {
+                result_spans.push(Span::styled(text.to_string(), run_style));
+            }
+            run_start = i;
+            run_style = byte_styles[i];
+        }
+    }
+    // Emit final run.
+    let text = &plain[run_start..];
+    if !text.is_empty() {
+        result_spans.push(Span::styled(text.to_string(), run_style));
+    }
+
+    Line::from(result_spans)
 }
 
 #[cfg(test)]

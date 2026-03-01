@@ -59,5 +59,11 @@
     "bg": "dark_gray",
     "bold": true
   },
+  "search": {
+    "match_fg": "black",
+    "match_bg": "yellow",
+    "focused_fg": "white",
+    "focused_bg": "blue"
+  },
   "syntect_theme": "base16-ocean.light"
 }

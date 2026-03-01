@@ -98,6 +98,8 @@ pub struct StyledSpan {
     pub text: String,
     /// The ratatui style to apply when rendering.
     pub style: Style,
+    /// Optional hyperlink URL for OSC 8 terminal links.
+    pub url: Option<String>,
 }
 
 /// A single cell in a GFM table.
@@ -196,6 +198,9 @@ struct ParseContext<'a> {
     /// sufficient because pulldown-cmark produces at most one such context
     /// level per list item before the next End(Item) event arrives.
     span_stash: Vec<StyledSpan>,
+    /// The URL of the link currently being parsed, if any.
+    /// Set on `Start(Tag::Link)`, cleared on `End(TagEnd::Link)`.
+    current_link_url: Option<String>,
 }
 
 impl<'a> ParseContext<'a> {
@@ -213,13 +218,16 @@ impl<'a> ParseContext<'a> {
             style_stack: Vec::new(),
             current_spans: Vec::new(),
             span_stash: Vec::new(),
+            current_link_url: None,
         }
     }
 
     /// Drives the pulldown-cmark event stream and returns the finished blocks.
     fn process(mut self, source: &str) -> Vec<RenderedBlock> {
-        let options =
-            Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let options = Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_MATH;
 
         for event in Parser::new_ext(source, options) {
             if self.state_stack.is_empty() {
@@ -268,11 +276,21 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InCodeBlock { language, buffer }) =
                     self.state_stack.pop()
                 {
-                    let highlighted_lines = self.highlighter.highlight_code(
-                        &buffer,
-                        &language,
-                        &self.theme.syntect_theme,
-                    );
+                    let highlighted_lines = if language == "mermaid" {
+                        // Mermaid diagrams have no syntect grammar — render as
+                        // plain text lines so the source is readable without
+                        // hitting syntect's unknown-language fallback.
+                        buffer
+                            .lines()
+                            .map(|line| Line::from(line.to_string()))
+                            .collect()
+                    } else {
+                        self.highlighter.highlight_code(
+                            &buffer,
+                            &language,
+                            &self.theme.syntect_theme,
+                        )
+                    };
                     self.emit_block(RenderedBlock::CodeBlock { language, highlighted_lines });
                 }
             }
@@ -450,10 +468,14 @@ impl<'a> ParseContext<'a> {
                 self.push_style(theme::inline_style(&self.theme.strong));
             }
             Event::End(TagEnd::Emphasis | TagEnd::Strong) => self.pop_style(),
-            Event::Start(Tag::Link { .. }) => {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.current_link_url = Some(dest_url.to_string());
                 self.push_style(theme::inline_style(&self.theme.link));
             }
-            Event::End(TagEnd::Link) => self.pop_style(),
+            Event::End(TagEnd::Link) => {
+                self.current_link_url = None;
+                self.pop_style();
+            }
             // Images inside table cells: push InImage state so subsequent events
             // (alt text, End(Image)) route through on_image_event. When the image
             // finishes, emit_block sees InTable on the stack and routes the block
@@ -483,8 +505,9 @@ impl<'a> ParseContext<'a> {
             Event::Start(Tag::Table(alignments)) => self.start_table(alignments),
 
             // ── Inline passthrough ───────────────────────────────────
-            // Links: render text in the link style; URL is ignored.
-            Event::Start(Tag::Link { .. }) => {
+            // Links: render text in the link style; capture URL for OSC 8.
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.current_link_url = Some(dest_url.to_string());
                 self.push_style(theme::inline_style(&self.theme.link));
             }
             // Images: enter InImage state to accumulate alt text, then load on End.
@@ -518,7 +541,10 @@ impl<'a> ParseContext<'a> {
             Event::End(TagEnd::BlockQuote(_)) => self.end_block_quote(),
 
             // ── Inline end ───────────────────────────────────────────
-            Event::End(TagEnd::Link) => self.pop_style(),
+            Event::End(TagEnd::Link) => {
+                self.current_link_url = None;
+                self.pop_style();
+            }
             // End(Image) is handled by on_image_event — should not reach here.
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 self.pop_style();
@@ -532,13 +558,15 @@ impl<'a> ParseContext<'a> {
             Event::Rule => self.emit_block(RenderedBlock::ThematicBreak),
             Event::TaskListMarker(checked) => self.handle_task_list_marker(checked),
 
+            // ── Math ────────────────────────────────────────────────
+            Event::InlineMath(text) => self.push_inline_math(&text),
+            Event::DisplayMath(text) => self.push_display_math(&text),
+
             // ── Ignored ──────────────────────────────────────────────
             // End events for passthrough/skipped tags have no handler.
             Event::End(_) => {}
             Event::FootnoteReference(_)
             | Event::InlineHtml(_)
-            | Event::InlineMath(_)
-            | Event::DisplayMath(_)
             | Event::Html(_) => {}
         }
     }
@@ -660,6 +688,7 @@ impl<'a> ParseContext<'a> {
                     self.current_spans.push(StyledSpan {
                         text: " ".to_string(),
                         style: Style::default(),
+                        url: None,
                     });
                 }
             }
@@ -802,23 +831,264 @@ impl<'a> ParseContext<'a> {
 
     fn push_text(&mut self, text: &str) {
         let style = effective_style(&self.style_stack);
-        self.current_spans.push(StyledSpan { text: text.to_string(), style });
+        let url = self.current_link_url.clone();
+        self.current_spans.push(StyledSpan { text: text.to_string(), style, url });
     }
 
     fn push_inline_code(&mut self, text: &str) {
+        let url = self.current_link_url.clone();
         self.current_spans
-            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline) });
+            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline), url });
     }
 
     fn push_soft_break(&mut self) {
         let style = effective_style(&self.style_stack);
-        self.current_spans.push(StyledSpan { text: " ".to_string(), style });
+        self.current_spans.push(StyledSpan { text: " ".to_string(), style, url: None });
     }
 
     fn push_hard_break(&mut self) {
         let style = effective_style(&self.style_stack);
-        self.current_spans.push(StyledSpan { text: "\n".to_string(), style });
+        self.current_spans.push(StyledSpan { text: "\n".to_string(), style, url: None });
     }
+
+    // ── Math handlers ───────────────────────────────────────────────────────
+
+    fn push_inline_math(&mut self, text: &str) {
+        let style = theme::inline_style(&self.theme.math_inline);
+        let converted = unicode_math(text);
+        self.current_spans.push(StyledSpan {
+            text: format!("${converted}$"),
+            style,
+            url: None,
+        });
+    }
+
+    fn push_display_math(&mut self, text: &str) {
+        let style = theme::inline_style(&self.theme.math_display);
+        let converted = unicode_math(text);
+        let content = vec![StyledSpan {
+            text: format!("$${converted}$$"),
+            style,
+            url: None,
+        }];
+        self.emit_block(RenderedBlock::Paragraph { content });
+    }
+}
+
+// ── LaTeX-to-Unicode conversion ──────────────────────────────────────────────
+
+/// Best-effort conversion of LaTeX math commands to Unicode characters.
+///
+/// Handles Greek letters, common operators, arrows, and limited
+/// superscript/subscript notation. Unrecognized commands pass through as-is.
+fn unicode_math(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            // Collect the command name (alphabetic characters after \).
+            let mut cmd = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_alphabetic() {
+                    cmd.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if cmd.is_empty() {
+                // Escaped non-alpha character (e.g. \{ \} \#): pass through.
+                if let Some(&next) = chars.peek() {
+                    result.push(next);
+                    chars.next();
+                } else {
+                    result.push('\\');
+                }
+            } else if let Some(replacement) = latex_command_to_unicode(&cmd) {
+                result.push_str(replacement);
+            } else {
+                // Unrecognized command: pass through as-is.
+                result.push('\\');
+                result.push_str(&cmd);
+            }
+        } else if ch == '^' {
+            // Superscript: ^{...} or ^x
+            let content = collect_braced_or_single(&mut chars);
+            for c in content.chars() {
+                result.push(superscript_char(c));
+            }
+        } else if ch == '_' {
+            // Subscript: _{...} or _x
+            let content = collect_braced_or_single(&mut chars);
+            for c in content.chars() {
+                result.push(subscript_char(c));
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
+/// Collects content from `{...}` braces or a single character.
+fn collect_braced_or_single(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    if chars.peek() == Some(&'{') {
+        chars.next(); // consume '{'
+        let mut content = String::new();
+        let mut depth = 1u32;
+        for c in chars.by_ref() {
+            if c == '{' {
+                depth += 1;
+                content.push(c);
+            } else if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                content.push(c);
+            } else {
+                content.push(c);
+            }
+        }
+        content
+    } else if let Some(&c) = chars.peek() {
+        chars.next();
+        c.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Maps a character to its Unicode superscript equivalent, if one exists.
+/// Falls back to the original character for unmapped codepoints.
+fn superscript_char(c: char) -> char {
+    match c {
+        '0' => '\u{2070}', '1' => '\u{00B9}', '2' => '\u{00B2}', '3' => '\u{00B3}',
+        '4' => '\u{2074}', '5' => '\u{2075}', '6' => '\u{2076}', '7' => '\u{2077}',
+        '8' => '\u{2078}', '9' => '\u{2079}', '+' => '\u{207A}', '-' => '\u{207B}',
+        '=' => '\u{207C}', '(' => '\u{207D}', ')' => '\u{207E}', 'n' => '\u{207F}',
+        'i' => '\u{2071}', _ => c,
+    }
+}
+
+/// Maps a character to its Unicode subscript equivalent, if one exists.
+/// Falls back to the original character for unmapped codepoints.
+fn subscript_char(c: char) -> char {
+    match c {
+        '0' => '\u{2080}', '1' => '\u{2081}', '2' => '\u{2082}', '3' => '\u{2083}',
+        '4' => '\u{2084}', '5' => '\u{2085}', '6' => '\u{2086}', '7' => '\u{2087}',
+        '8' => '\u{2088}', '9' => '\u{2089}', '+' => '\u{208A}', '-' => '\u{208B}',
+        '=' => '\u{208C}', '(' => '\u{208D}', ')' => '\u{208E}',
+        'a' => '\u{2090}', 'e' => '\u{2091}', 'o' => '\u{2092}', 'x' => '\u{2093}',
+        'h' => '\u{2095}', 'k' => '\u{2096}', 'l' => '\u{2097}', 'm' => '\u{2098}',
+        'n' => '\u{2099}', 'p' => '\u{209A}', 's' => '\u{209B}', 't' => '\u{209C}',
+        _ => c,
+    }
+}
+
+/// Maps a LaTeX command name to its Unicode replacement.
+fn latex_command_to_unicode(cmd: &str) -> Option<&'static str> {
+    Some(match cmd {
+        // Greek lowercase
+        "alpha" => "\u{03B1}",
+        "beta" => "\u{03B2}",
+        "gamma" => "\u{03B3}",
+        "delta" => "\u{03B4}",
+        "epsilon" => "\u{03B5}",
+        "zeta" => "\u{03B6}",
+        "eta" => "\u{03B7}",
+        "theta" => "\u{03B8}",
+        "iota" => "\u{03B9}",
+        "kappa" => "\u{03BA}",
+        "lambda" => "\u{03BB}",
+        "mu" => "\u{03BC}",
+        "nu" => "\u{03BD}",
+        "xi" => "\u{03BE}",
+        "pi" => "\u{03C0}",
+        "rho" => "\u{03C1}",
+        "sigma" => "\u{03C3}",
+        "tau" => "\u{03C4}",
+        "upsilon" => "\u{03C5}",
+        "phi" => "\u{03C6}",
+        "chi" => "\u{03C7}",
+        "psi" => "\u{03C8}",
+        "omega" => "\u{03C9}",
+        // Greek uppercase
+        "Gamma" => "\u{0393}",
+        "Delta" => "\u{0394}",
+        "Theta" => "\u{0398}",
+        "Lambda" => "\u{039B}",
+        "Xi" => "\u{039E}",
+        "Pi" => "\u{03A0}",
+        "Sigma" => "\u{03A3}",
+        "Phi" => "\u{03A6}",
+        "Psi" => "\u{03A8}",
+        "Omega" => "\u{03A9}",
+        // Operators
+        "times" => "\u{00D7}",
+        "div" => "\u{00F7}",
+        "pm" => "\u{00B1}",
+        "mp" => "\u{2213}",
+        "cdot" => "\u{00B7}",
+        "leq" | "le" => "\u{2264}",
+        "geq" | "ge" => "\u{2265}",
+        "neq" | "ne" => "\u{2260}",
+        "approx" => "\u{2248}",
+        "equiv" => "\u{2261}",
+        "subset" => "\u{2282}",
+        "supset" => "\u{2283}",
+        "subseteq" => "\u{2286}",
+        "supseteq" => "\u{2287}",
+        "in" => "\u{2208}",
+        "notin" => "\u{2209}",
+        "cup" => "\u{222A}",
+        "cap" => "\u{2229}",
+        "land" | "wedge" => "\u{2227}",
+        "lor" | "vee" => "\u{2228}",
+        "neg" | "lnot" => "\u{00AC}",
+        "forall" => "\u{2200}",
+        "exists" => "\u{2203}",
+        "nabla" => "\u{2207}",
+        "partial" => "\u{2202}",
+        "infty" => "\u{221E}",
+        "emptyset" => "\u{2205}",
+        // Big operators
+        "sum" => "\u{03A3}",
+        "prod" => "\u{03A0}",
+        "int" => "\u{222B}",
+        "iint" => "\u{222C}",
+        "iiint" => "\u{222D}",
+        "oint" => "\u{222E}",
+        "sqrt" => "\u{221A}",
+        // Arrows
+        "to" | "rightarrow" => "\u{2192}",
+        "leftarrow" => "\u{2190}",
+        "leftrightarrow" => "\u{2194}",
+        "Rightarrow" => "\u{21D2}",
+        "Leftarrow" => "\u{21D0}",
+        "Leftrightarrow" | "iff" => "\u{21D4}",
+        "uparrow" => "\u{2191}",
+        "downarrow" => "\u{2193}",
+        "mapsto" => "\u{21A6}",
+        // Miscellaneous
+        "ldots" | "dots" | "cdots" => "\u{2026}",
+        "prime" => "\u{2032}",
+        "circ" => "\u{2218}",
+        "bullet" => "\u{2022}",
+        "star" => "\u{22C6}",
+        "dagger" => "\u{2020}",
+        "ddagger" => "\u{2021}",
+        // Spacing commands: collapse to a space.
+        "quad" | "qquad" => " ",
+        // Formatting wrappers: drop the command, content follows in braces.
+        "text" | "mathrm" | "mathbf" | "mathit" | "mathsf" | "mathtt"
+        | "textbf" | "textit" | "textrm" => "",
+        "frac" => "/",
+        "left" | "right" | "bigl" | "bigr" | "Big" | "big" => "",
+        _ => return None,
+    })
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

@@ -62,5 +62,11 @@
     "bg": "#44475a",
     "bold": true
   },
+  "search": {
+    "match_fg": "#282a36",
+    "match_bg": "#f1fa8c",
+    "focused_fg": "#282a36",
+    "focused_bg": "#8be9fd"
+  },
   "syntect_theme": "base16-eighties.dark"
 }

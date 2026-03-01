@@ -11,6 +11,7 @@
         StyledSpan {
             text: text.to_string(),
             style: Style::default(),
+            url: None,
         }
     }
 
@@ -18,6 +19,7 @@
         StyledSpan {
             text: text.to_string(),
             style,
+            url: None,
         }
     }
 
@@ -1129,4 +1131,80 @@
             doc.total_height, 3,
             "empty image should produce minimum 1-line row"
         );
+    }
+
+    // ── OSC 8 link layout tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_layout_link_url_produces_osc8_in_spans() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![StyledSpan {
+                text: "click".to_string(),
+                style: Style::default(),
+                url: Some("https://example.com".to_string()),
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.total_height, 1);
+        match &doc.lines[0] {
+            DocumentLine::Text(line) => {
+                let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    full_text.contains("\x1b]8;;https://example.com\x1b\\"),
+                    "span text should contain OSC 8 open sequence"
+                );
+                assert!(
+                    full_text.contains("\x1b]8;;\x1b\\"),
+                    "span text should contain OSC 8 close sequence"
+                );
+                assert!(full_text.contains("click"), "span text should contain visible text");
+            }
+            _ => panic!("expected Text line"),
+        }
+    }
+
+    #[test]
+    fn test_layout_no_url_no_osc8() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![plain_span("hello")],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        match &doc.lines[0] {
+            DocumentLine::Text(line) => {
+                let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    !full_text.contains("\x1b]8"),
+                    "plain text should not contain OSC 8 sequences"
+                );
+            }
+            _ => panic!("expected Text line"),
+        }
+    }
+
+    #[test]
+    fn test_layout_url_sanitized_strips_control_chars() {
+        let blocks = vec![RenderedBlock::Paragraph {
+            content: vec![StyledSpan {
+                text: "x".to_string(),
+                style: Style::default(),
+                url: Some("https://evil.com/\x1b[31mred".to_string()),
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        match &doc.lines[0] {
+            DocumentLine::Text(line) => {
+                let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                // The ESC control character should be stripped from the URL.
+                assert!(
+                    !full_text.contains("\x1b[31m"),
+                    "ESC sequence in URL should be broken by stripping control chars"
+                );
+                // After stripping ESC (0x1b), the URL becomes "https://evil.com/[31mred".
+                assert!(
+                    full_text.contains("https://evil.com/[31mred"),
+                    "URL with ESC stripped should be present"
+                );
+            }
+            _ => panic!("expected Text line"),
+        }
     }

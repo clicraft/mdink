@@ -21,6 +21,8 @@ USAGE EXAMPLES:
   cat notes.md | mdink -           Read from stdin
   mdink --dump-theme > my.json     Export current theme as JSON
   mdink -s my.json README.md       Use a custom theme file
+  mdink https://example.com/README.md  Render from URL
+  mdink --print README.md             Print to stdout (no TUI)
 
 KEYBINDINGS:
   j / Down / Scroll Down    Scroll down
@@ -29,7 +31,10 @@ KEYBINDINGS:
   u / Page Up                Page up
   g / Home                   Go to top
   G / End                    Go to bottom
+  o                          Toggle outline panel
+  f                          Open file browser
   r                          Refresh / re-render
+  t                          Cycle theme (dark/light/dracula)
   q / Esc                    Quit
 
 THEMES:
@@ -47,7 +52,7 @@ CONFIG FILE:
   CLI flags and env vars take precedence over config values."
 )]
 pub struct Cli {
-    /// Markdown file to render (use "-" for stdin).
+    /// Markdown file or URL to render (use "-" for stdin).
     #[arg(required_unless_present_any = ["list_themes", "dump_theme"])]
     pub file: Option<String>,
 
@@ -74,4 +79,8 @@ pub struct Cli {
     /// Dump the resolved theme as JSON and exit.
     #[arg(long)]
     pub dump_theme: bool,
+
+    /// Print rendered output to stdout (no TUI) and exit.
+    #[arg(long)]
+    pub print: bool,
 }

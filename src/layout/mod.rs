@@ -167,6 +167,7 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, 
                 &[crate::parser::StyledSpan {
                     text: format!("[image: {}]", alt_text),
                     style: theme::inline_style(&theme.image_alt),
+                    url: None,
                 }],
                 width,
             );
@@ -681,12 +682,15 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
         return wrap_with_hard_breaks(spans, width);
     }
 
-    // 1. Build plain text and parallel byte-to-style map.
+    // 1. Build plain text and parallel byte-to-style/url maps.
     let mut plain = String::new();
     let mut byte_styles: Vec<Style> = Vec::new();
+    let mut byte_urls: Vec<Option<&str>> = Vec::new();
     for span in spans {
+        let url_ref = span.url.as_deref();
         for _ in span.text.bytes() {
             byte_styles.push(span.style);
+            byte_urls.push(url_ref);
         }
         plain.push_str(&span.text);
     }
@@ -745,7 +749,7 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
             continue;
         }
 
-        let line_spans = build_spans_for_range(&plain, &byte_styles, line_start, line_end);
+        let line_spans = build_spans_for_range(&plain, &byte_styles, &byte_urls, line_start, line_end);
         result.push(Line::from(line_spans));
 
         cursor = line_end;
@@ -757,11 +761,14 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
 /// Builds styled `Span`s for a byte range of the plain text.
 ///
 /// Walks through the range by characters, grouping consecutive bytes
-/// that share the same style into a single `Span`. All slicing happens
-/// at character boundaries.
+/// that share the same style and URL into a single `Span`. When a URL
+/// is present, the span text is wrapped in OSC 8 hyperlink escape
+/// sequences so terminals that support OSC 8 render clickable links.
+/// All slicing happens at character boundaries.
 fn build_spans_for_range(
     plain: &str,
     byte_styles: &[Style],
+    byte_urls: &[Option<&str>],
     start: usize,
     end: usize,
 ) -> Vec<Span<'static>> {
@@ -773,26 +780,54 @@ fn build_spans_for_range(
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run_start = start;
     let mut run_style = byte_styles[start];
+    let mut run_url = byte_urls[start];
 
     for (i, _ch) in segment.char_indices() {
         let abs_pos = start + i;
-        if byte_styles[abs_pos] != run_style {
+        if byte_styles[abs_pos] != run_style || byte_urls[abs_pos] != run_url {
             let text = &plain[run_start..abs_pos];
             if !text.is_empty() {
-                spans.push(Span::styled(text.to_string(), run_style));
+                spans.push(make_span(text, run_style, run_url));
             }
             run_start = abs_pos;
             run_style = byte_styles[abs_pos];
+            run_url = byte_urls[abs_pos];
         }
     }
 
     // Emit final run.
     let text = &plain[run_start..end];
     if !text.is_empty() {
-        spans.push(Span::styled(text.to_string(), run_style));
+        spans.push(make_span(text, run_style, run_url));
     }
 
     spans
+}
+
+/// Creates a `Span` from text, style, and optional URL.
+///
+/// When a URL is present, the text is wrapped in OSC 8 hyperlink escape
+/// sequences: `ESC ] 8 ; ; url ST text ESC ] 8 ; ; ST`. The URL is
+/// sanitized to strip control characters that could inject terminal escapes.
+fn make_span(text: &str, style: Style, url: Option<&str>) -> Span<'static> {
+    match url {
+        Some(u) => {
+            let safe_url = sanitize_url(u);
+            let linked = format!("\x1b]8;;{safe_url}\x1b\\{text}\x1b]8;;\x1b\\");
+            Span::styled(linked, style)
+        }
+        None => Span::styled(text.to_string(), style),
+    }
+}
+
+/// Strips control characters from a URL to prevent terminal escape injection.
+///
+/// Removes ASCII control characters (0x00-0x1f, 0x7f) so that a malicious
+/// URL cannot inject arbitrary terminal escape sequences via OSC 8.
+fn sanitize_url(url: &str) -> String {
+    url.chars()
+        .filter(|c| !c.is_ascii_control())
+        .collect()
 }
 
 /// Handles text containing hard breaks by splitting at `\n` boundaries
@@ -809,6 +844,7 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
                     current_group.push(StyledSpan {
                         text: part.to_string(),
                         style: span.style,
+                        url: span.url.clone(),
                     });
                 }
                 if i < parts.len() - 1 {
@@ -819,6 +855,7 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
             current_group.push(StyledSpan {
                 text: span.text.clone(),
                 style: span.style,
+                url: span.url.clone(),
             });
         }
     }
