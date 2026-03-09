@@ -1,0 +1,48 @@
+%YAML 1.2
+---
+name: Oracle
+file_extensions:
+  - sql.oracle
+  - sql-oracle
+  - oracle
+  - plsql
+  - sql.plsql
+scope: source.sql.oracle
+
+contexts:
+  main:
+    # Block comments
+    - match: /\*
+      scope: punctuation.definition.comment.begin.oracle
+      push:
+        - meta_scope: comment.block.oracle
+        - match: \*/
+          scope: punctuation.definition.comment.end.oracle
+          pop: true
+    # Line comments
+    - match: --[^\r\n]*
+      scope: comment.line.double-dash.oracle
+    # Single-quoted strings
+    - match: "'[^']*'"
+      scope: string.quoted.single.oracle
+    # Double-quoted identifiers
+    - match: '"[^"]*"'
+      scope: string.quoted.double.oracle
+    # Bind variables (Oracle-specific)
+    - match: ':[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.bind.oracle
+    # Oracle-specific keywords
+    - match: '\b(CONNECT\s+BY|START\s+WITH|PRIOR|NOCYCLE|ROWNUM|ROWID|DUAL|MINUS)\b'
+      scope: keyword.other.oracle
+    # Standard SQL keywords
+    - match: '\b(SELECT|FROM|WHERE|INSERT|INTO|UPDATE|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|JOIN|LEFT|RIGHT|INNER|OUTER|CROSS|ON|USING|AND|OR|NOT|IN|BETWEEN|LIKE|IS|NULL|GROUP|ORDER|HAVING|DISTINCT|UNION|CASE|WHEN|THEN|ELSE|END|FETCH|FIRST|NEXT|ROWS|VALUES|SET|BEGIN|END)\b'
+      scope: keyword.control.oracle
+    # Oracle-specific types
+    - match: '\b(VARCHAR2|NVARCHAR2|NUMBER|CLOB|BLOB|NCLOB|RAW)\b'
+      scope: storage.type.oracle
+    # Functions
+    - match: '\b(NVL|NVL2|DECODE|LPAD|RPAD|INSTR|SUBSTR|TO_CHAR|TO_DATE|SYS_GUID|COALESCE)\b(?=\s*\()'
+      scope: support.function.oracle
+    # Numbers
+    - match: '\b[0-9]+\.?[0-9]*\b'
+      scope: constant.numeric.oracle

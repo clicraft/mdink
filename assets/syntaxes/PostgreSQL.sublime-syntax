@@ -1,0 +1,51 @@
+%YAML 1.2
+---
+name: PostgreSQL
+file_extensions:
+  - sql.postgresql
+  - sql.postgres
+  - sql-postgresql
+  - postgresql
+  - pgsql
+scope: source.sql.postgresql
+
+contexts:
+  main:
+    # Block comments
+    - match: /\*
+      scope: punctuation.definition.comment.begin.postgresql
+      push:
+        - meta_scope: comment.block.postgresql
+        - match: \*/
+          scope: punctuation.definition.comment.end.postgresql
+          pop: true
+    # Line comments
+    - match: --[^\r\n]*
+      scope: comment.line.double-dash.postgresql
+    # Single-quoted strings
+    - match: "'[^']*'"
+      scope: string.quoted.single.postgresql
+    # Double-quoted identifiers
+    - match: '"[^"]*"'
+      scope: string.quoted.double.postgresql
+    # PostgreSQL-specific operators
+    - match: '(->|->@|->>|@>|<@|\?|\?\||\?\&|@\?|@@)'
+      scope: keyword.operator.json.postgresql
+    # PostgreSQL-specific keywords
+    - match: '\b(RETURNING|LATERAL|DISTINCT\s+ON|ILIKE|SIMILAR\s+TO|RECURSIVE)\b'
+      scope: keyword.other.postgresql
+    # Standard SQL keywords
+    - match: '\b(SELECT|FROM|WHERE|INSERT|INTO|UPDATE|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|JOIN|LEFT|RIGHT|INNER|OUTER|CROSS|ON|USING|AND|OR|NOT|IN|BETWEEN|LIKE|IS|NULL|GROUP|ORDER|HAVING|DISTINCT|UNION|CASE|WHEN|THEN|ELSE|END|LIMIT|OFFSET|VALUES|SET|WITH|BEGIN|END)\b'
+      scope: keyword.control.postgresql
+    # PostgreSQL-specific types
+    - match: '\b(SERIAL|BIGSERIAL|UUID|JSONB|BYTEA|BOOLEAN|HSTORE|ARRAY)\b'
+      scope: storage.type.postgresql
+    # Functions
+    - match: '\b(ARRAY_AGG|UNNEST|GENERATE_SERIES|JSON_AGG|JSONB_BUILD_OBJECT|JSON_EACH|DATE_TRUNC|STRING_AGG|COALESCE)\b(?=\s*\()'
+      scope: support.function.postgresql
+    # Numbers
+    - match: '\b[0-9]+\.?[0-9]*\b'
+      scope: constant.numeric.postgresql
+    # Type cast operator
+    - match: '::'
+      scope: keyword.operator.cast.postgresql

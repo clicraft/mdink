@@ -1,0 +1,49 @@
+%YAML 1.2
+---
+name: MySQL
+file_extensions:
+  - sql.mysql
+  - sql-mysql
+  - mysql
+scope: source.sql.mysql
+
+contexts:
+  main:
+    # Block comments
+    - match: /\*
+      scope: punctuation.definition.comment.begin.mysql
+      push:
+        - meta_scope: comment.block.mysql
+        - match: \*/
+          scope: punctuation.definition.comment.end.mysql
+          pop: true
+    # Line comments
+    - match: --[^\r\n]*
+      scope: comment.line.double-dash.mysql
+    # Hash comments
+    - match: '#[^\r\n]*'
+      scope: comment.line.hash.mysql
+    # Single-quoted strings
+    - match: "'[^']*'"
+      scope: string.quoted.single.mysql
+    # Double-quoted strings
+    - match: '"[^"]*"'
+      scope: string.quoted.double.mysql
+    # Backtick identifiers (MySQL-specific)
+    - match: '`[^`]*`'
+      scope: string.quoted.backtick.mysql
+    # MySQL-specific keywords
+    - match: '\b(ON\s+DUPLICATE\s+KEY|STRAIGHT_JOIN|DELIMITER|REGEXP|RLIKE)\b'
+      scope: keyword.other.mysql
+    # Standard SQL keywords
+    - match: '\b(SELECT|FROM|WHERE|INSERT|INTO|UPDATE|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|JOIN|LEFT|RIGHT|INNER|OUTER|CROSS|ON|USING|AND|OR|NOT|IN|BETWEEN|LIKE|IS|NULL|GROUP|ORDER|HAVING|DISTINCT|UNION|CASE|WHEN|THEN|ELSE|END|LIMIT|OFFSET|VALUES|SET)\b'
+      scope: keyword.control.mysql
+    # MySQL-specific types
+    - match: '\b(TINYINT|MEDIUMINT|UNSIGNED|ZEROFILL|ENUM|SET|BINARY|VARBINARY|JSON)\b'
+      scope: storage.type.mysql
+    # Functions
+    - match: '\b(GROUP_CONCAT|IFNULL|IF|BIT_COUNT|BIT_AND|BIT_OR|BIT_XOR|DATE_FORMAT|CURDATE|CURTIME|NOW)\b(?=\s*\()'
+      scope: support.function.mysql
+    # Numbers
+    - match: '\b[0-9]+\.?[0-9]*\b'
+      scope: constant.numeric.mysql

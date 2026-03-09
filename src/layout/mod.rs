@@ -118,7 +118,7 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, 
             // Emit language label header if language is specified.
             if !language.is_empty() {
                 let label = Span::styled(
-                    format!(" {language} "),
+                    format!(" {} ", language_display_name(language)),
                     theme::code_label_style(&theme.code_block),
                 );
                 result.push(DocumentLine::Code(Line::from(label)));
@@ -827,6 +827,22 @@ fn sanitize_url(url: &str) -> String {
     url.chars()
         .filter(|c| !c.is_ascii_control())
         .collect()
+}
+
+/// Maps a markdown fence language tag to a display-friendly name.
+/// SQL dialect tags like "sql.postgresql" become "SQL (PostgreSQL)".
+/// All registered aliases are covered. Unknown tags pass through unchanged.
+fn language_display_name(language: &str) -> &str {
+    match language {
+        "sql.mysql" | "sql-mysql" | "mysql" => "SQL (MySQL)",
+        "sql.postgresql" | "sql.postgres" | "sql-postgresql" | "postgresql" | "pgsql" => {
+            "SQL (PostgreSQL)"
+        }
+        "sql.oracle" | "sql-oracle" | "oracle" | "plsql" | "sql.plsql" => "SQL (Oracle)",
+        "sql.mssql" | "sql-mssql" | "sql.tsql" | "sql-tsql" | "sql.sqlserver" | "tsql"
+        | "t-sql" | "mssql" => "SQL (T-SQL)",
+        other => other,
+    }
 }
 
 /// Handles text containing hard breaks by splitting at `\n` boundaries
