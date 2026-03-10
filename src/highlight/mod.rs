@@ -139,6 +139,32 @@ fn load_syntax_set() -> SyntaxSet {
         builder.add(def);
     }
 
+    // SQL dialects: MySQL, PostgreSQL, Oracle, T-SQL
+    const MYSQL_SYNTAX: &str =
+        include_str!("../../assets/syntaxes/MySQL.sublime-syntax");
+    const POSTGRESQL_SYNTAX: &str =
+        include_str!("../../assets/syntaxes/PostgreSQL.sublime-syntax");
+    const ORACLE_SYNTAX: &str =
+        include_str!("../../assets/syntaxes/Oracle.sublime-syntax");
+    const TSQL_SYNTAX: &str =
+        include_str!("../../assets/syntaxes/TSQL.sublime-syntax");
+
+    for (name, syntax_str) in [
+        ("MySQL", MYSQL_SYNTAX),
+        ("PostgreSQL", POSTGRESQL_SYNTAX),
+        ("Oracle", ORACLE_SYNTAX),
+        ("T-SQL", TSQL_SYNTAX),
+    ] {
+        match SyntaxDefinition::load_from_str(syntax_str, true, None) {
+            Ok(def) => {
+                builder.add(def);
+            }
+            Err(_) => {
+                debug_assert!(false, "failed to load bundled {name} syntax definition");
+            }
+        }
+    }
+
     builder.build()
 }
 

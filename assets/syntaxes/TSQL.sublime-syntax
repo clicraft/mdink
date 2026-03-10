@@ -1,0 +1,57 @@
+%YAML 1.2
+---
+name: TSQL
+file_extensions:
+  - sql.mssql
+  - sql-mssql
+  - sql.tsql
+  - sql-tsql
+  - sql.sqlserver
+  - tsql
+  - t-sql
+  - mssql
+scope: source.sql.tsql
+
+contexts:
+  main:
+    # Block comments
+    - match: /\*
+      scope: punctuation.definition.comment.begin.tsql
+      push:
+        - meta_scope: comment.block.tsql
+        - match: \*/
+          scope: punctuation.definition.comment.end.tsql
+          pop: true
+    # Line comments
+    - match: --[^\r\n]*
+      scope: comment.line.double-dash.tsql
+    # Bracket-quoted identifiers (T-SQL-specific)
+    - match: '\[[^\]]*\]'
+      scope: string.quoted.bracket.tsql
+    # Single-quoted strings
+    - match: "'[^']*'"
+      scope: string.quoted.single.tsql
+    # Double-quoted identifiers
+    - match: '"[^"]*"'
+      scope: string.quoted.double.tsql
+    # System variables (@@) - must come before local variables
+    - match: '@@[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.system.tsql
+    # Local variables (@)
+    - match: '@[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.local.tsql
+    # T-SQL-specific keywords
+    - match: '\b(TOP|OUTPUT|CROSS\s+APPLY|OUTER\s+APPLY|DECLARE|GO|EXEC|EXECUTE|PRINT|NOLOCK|OPTION|INSERTED|DELETED)\b'
+      scope: keyword.other.tsql
+    # Standard SQL keywords
+    - match: '\b(SELECT|FROM|WHERE|INSERT|INTO|UPDATE|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|JOIN|LEFT|RIGHT|INNER|OUTER|CROSS|ON|USING|AND|OR|NOT|IN|BETWEEN|LIKE|IS|NULL|GROUP|ORDER|HAVING|DISTINCT|UNION|CASE|WHEN|THEN|ELSE|END|VALUES|SET|BEGIN|END|WITH)\b'
+      scope: keyword.control.tsql
+    # T-SQL-specific types
+    - match: '\b(NVARCHAR|NCHAR|UNIQUEIDENTIFIER|DATETIME2|DATETIMEOFFSET|MONEY|SQL_VARIANT)\b'
+      scope: storage.type.tsql
+    # Functions
+    - match: '\b(ISNULL|GETDATE|GETUTCDATE|SYSDATETIME|CONVERT|CHARINDEX|STUFF|DATEDIFF|DATEADD|DATEPART|EOMONTH|NEWID|COALESCE)\b(?=\s*\()'
+      scope: support.function.tsql
+    # Numbers
+    - match: '\b[0-9]+\.?[0-9]*\b'
+      scope: constant.numeric.tsql

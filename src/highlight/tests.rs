@@ -176,3 +176,127 @@
             "non-comment code should not have forced ITALIC"
         );
     }
+
+    // ── SQL dialect tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_highlight_sql_mysql_resolves() {
+        let code = "SELECT * FROM `users` WHERE id = 1;\n";
+        let lines = highlighter().highlight_code(code, "sql.mysql", DEFAULT_THEME);
+        assert!(!lines.is_empty(), "sql.mysql should resolve to MySQL grammar");
+        let has_color = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg != Some(Color::default()))
+        });
+        assert!(has_color, "MySQL SQL should have syntax coloring");
+    }
+
+    #[test]
+    fn test_highlight_sql_mysql_aliases() {
+        for token in &["mysql", "sql-mysql"] {
+            let lines = highlighter().highlight_code("SELECT 1;\n", token, DEFAULT_THEME);
+            assert!(
+                !lines.is_empty(),
+                "MySQL alias '{token}' should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_sql_postgresql_resolves() {
+        let code = "SELECT id FROM users RETURNING id;\n";
+        let lines = highlighter().highlight_code(code, "sql.postgresql", DEFAULT_THEME);
+        assert!(
+            !lines.is_empty(),
+            "sql.postgresql should resolve to PostgreSQL grammar"
+        );
+        let has_color = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg != Some(Color::default()))
+        });
+        assert!(has_color, "PostgreSQL SQL should have syntax coloring");
+    }
+
+    #[test]
+    fn test_highlight_sql_postgresql_aliases() {
+        for token in &["postgresql", "pgsql", "sql.postgres", "sql-postgresql"] {
+            let lines = highlighter().highlight_code("SELECT 1;\n", token, DEFAULT_THEME);
+            assert!(
+                !lines.is_empty(),
+                "PostgreSQL alias '{token}' should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_sql_oracle_resolves() {
+        let code = "SELECT * FROM dual WHERE ROWNUM <= 10;\n";
+        let lines = highlighter().highlight_code(code, "sql.oracle", DEFAULT_THEME);
+        assert!(
+            !lines.is_empty(),
+            "sql.oracle should resolve to Oracle grammar"
+        );
+        let has_color = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg != Some(Color::default()))
+        });
+        assert!(has_color, "Oracle SQL should have syntax coloring");
+    }
+
+    #[test]
+    fn test_highlight_sql_oracle_aliases() {
+        for token in &["oracle", "plsql", "sql.plsql", "sql-oracle"] {
+            let lines = highlighter().highlight_code("SELECT 1 FROM dual;\n", token, DEFAULT_THEME);
+            assert!(
+                !lines.is_empty(),
+                "Oracle alias '{token}' should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_sql_tsql_resolves() {
+        let code = "SELECT TOP 10 [user_id] FROM [dbo].[users] WHERE @status = 'active';\n";
+        let lines = highlighter().highlight_code(code, "sql.mssql", DEFAULT_THEME);
+        assert!(
+            !lines.is_empty(),
+            "sql.mssql should resolve to T-SQL grammar"
+        );
+        let has_color = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg != Some(Color::default()))
+        });
+        assert!(has_color, "T-SQL should have syntax coloring");
+    }
+
+    #[test]
+    fn test_highlight_sql_tsql_aliases() {
+        for token in &[
+            "mssql",
+            "tsql",
+            "t-sql",
+            "sql.tsql",
+            "sql.sqlserver",
+            "sql-mssql",
+        ] {
+            let lines = highlighter().highlight_code("SELECT 1;\n", token, DEFAULT_THEME);
+            assert!(
+                !lines.is_empty(),
+                "T-SQL alias '{token}' should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_generic_sql_unchanged() {
+        let code = "SELECT id, name FROM users WHERE active = 1;\n";
+        let lines = highlighter().highlight_code(code, "sql", DEFAULT_THEME);
+        assert!(
+            !lines.is_empty(),
+            "'sql' should still resolve to generic SQL grammar"
+        );
+    }
