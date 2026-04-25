@@ -8,6 +8,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(test)]
+use ratatui::crossterm::event::KeyEventKind;
 
 use crate::layout::{DocumentLine, PreRenderedDocument};
 use crate::theme::MarkdownTheme;
@@ -53,6 +55,17 @@ pub struct FileBrowserState {
     pub scroll: usize,
 }
 
+/// A snapshot of the document state saved before following a link.
+///
+/// Pushed onto `nav_history` before loading a new document.
+/// Popped by `Backspace` to restore the previous document.
+pub struct NavHistoryEntry {
+    pub source: String,
+    pub base_path: PathBuf,
+    pub filename: String,
+    pub scroll_offset: usize,
+}
+
 /// Built-in theme names, in cycling order.
 pub const THEME_CYCLE: &[&str] = &["dark", "light", "dracula"];
 
@@ -92,6 +105,8 @@ pub struct App {
     pub theme_cycle_requested: bool,
     /// Search / find-in-page state. `None` = no search active.
     pub search: Option<SearchState>,
+    /// Goto-line input state. `Some` when the user is typing `:42`.
+    pub goto_input: Option<String>,
     /// File browser state. `None` = hidden.
     pub file_browser: Option<FileBrowserState>,
     /// Set when user selects a file in the browser; main.rs reads and clears this.
@@ -112,6 +127,46 @@ pub struct App {
     pub last_exported_pdf: Option<PathBuf>,
     /// When true, the event loop should open the last exported PDF.
     pub open_pdf_requested: bool,
+    /// When true, link navigation mode is active.
+    pub link_mode: bool,
+    /// Index into `document.links` for the currently selected link.
+    pub link_selected: usize,
+    /// Navigation history stack (pushed before following a link).
+    pub nav_history: Vec<NavHistoryEntry>,
+    /// When true, the event loop should follow the selected link.
+    pub link_follow_requested: bool,
+    /// When true, the event loop should navigate back in history.
+    pub back_requested: bool,
+    /// Whether image navigation mode is active.
+    pub image_mode: bool,
+    /// Index into `document.images` for the currently selected image.
+    pub image_selected: usize,
+    /// Set when user presses Enter on an image to open it externally.
+    pub image_follow_requested: bool,
+    /// Whether remote image fetching is enabled (toggleable at runtime via `I`).
+    pub fetch_remote_images: bool,
+    /// Whether remote markdown link following is enabled (toggleable at runtime via `L`).
+    pub fetch_remote_markdown: bool,
+    /// Whether LaTeX pixel rendering is enabled (toggleable at runtime via `T`).
+    pub math_images_enabled: bool,
+}
+
+/// Abstraction over navigation entries that have a line position.
+/// Used by `App::nearest_entry_index` to search both links and images.
+trait EntryWithLine {
+    fn line_index(&self) -> usize;
+}
+
+impl EntryWithLine for crate::layout::LinkEntry {
+    fn line_index(&self) -> usize {
+        self.line_index
+    }
+}
+
+impl EntryWithLine for crate::layout::ImageEntry {
+    fn line_index(&self) -> usize {
+        self.line_index
+    }
 }
 
 impl App {
@@ -124,6 +179,9 @@ impl App {
         filename: String,
         theme: MarkdownTheme,
         source_path: PathBuf,
+        fetch_remote_images: bool,
+        fetch_remote_markdown: bool,
+        math_images_enabled: bool,
     ) -> Self {
         let theme_index = THEME_CYCLE
             .iter()
@@ -144,6 +202,7 @@ impl App {
             theme_index,
             theme_cycle_requested: false,
             search: None,
+            goto_input: None,
             file_browser: None,
             file_selected: None,
             print_preview: false,
@@ -154,6 +213,17 @@ impl App {
             status_message: None,
             last_exported_pdf: None,
             open_pdf_requested: false,
+            link_mode: false,
+            link_selected: 0,
+            nav_history: Vec::new(),
+            link_follow_requested: false,
+            back_requested: false,
+            image_mode: false,
+            image_selected: 0,
+            image_follow_requested: false,
+            fetch_remote_images,
+            fetch_remote_markdown,
+            math_images_enabled,
         }
     }
 
@@ -182,7 +252,59 @@ impl App {
             return;
         }
 
-        // Priority 2: Outline-specific keys when outline is visible.
+        // Priority 1.5: Goto-line input mode captures all keys.
+        if self.goto_input.is_some() {
+            self.handle_goto_input(key);
+            return;
+        }
+
+        // Priority 2: Link mode captures Tab/Shift+Tab/Enter/Esc.
+        if self.link_mode {
+            match key.code {
+                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.link_select_next();
+                    return;
+                }
+                KeyCode::BackTab => {
+                    self.link_select_prev();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.link_follow_requested = true;
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.link_mode = false;
+                    return;
+                }
+                _ => {} // fall through to lower priorities (j/k still scroll)
+            }
+        }
+
+        // Priority 2.5: Image mode captures Tab/Shift+Tab/Enter/Esc.
+        if self.image_mode {
+            match key.code {
+                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.image_select_next();
+                    return;
+                }
+                KeyCode::BackTab => {
+                    self.image_select_prev();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.image_follow_requested = true;
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.image_mode = false;
+                    return;
+                }
+                _ => {} // fall through to lower priorities (j/k still scroll)
+            }
+        }
+
+        // Priority 3: Outline-specific keys when outline is visible.
         if self.outline.is_some() {
             match key.code {
                 KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -214,7 +336,7 @@ impl App {
             }
         }
 
-        // Priority 3: Search results mode (n/N navigate, Esc clears, / re-enters).
+        // Priority 4: Search results mode (n/N navigate, Esc clears, / re-enters).
         if self.search.is_some() {
             match key.code {
                 KeyCode::Char('n') => {
@@ -240,7 +362,7 @@ impl App {
             }
         }
 
-        // Priority 4: Normal keys.
+        // Priority 5: Normal keys.
         match key.code {
             // Open last exported PDF (only when one exists in print preview)
             KeyCode::Char('o') if self.print_preview && self.last_exported_pdf.is_some() => {
@@ -248,6 +370,8 @@ impl App {
             }
             // Enter search mode
             KeyCode::Char('/') => self.enter_search_mode(),
+            // Enter goto-line mode
+            KeyCode::Char(':') => self.goto_input = Some(String::new()),
             // Toggle outline
             KeyCode::Char('o') => self.toggle_outline(),
             // Scroll down 1 line
@@ -288,6 +412,43 @@ impl App {
             }
             // Open file browser
             KeyCode::Char('f') => self.open_file_browser(),
+            // Enter link navigation mode
+            KeyCode::Char('l') => self.enter_link_mode(),
+            // Enter image navigation mode
+            KeyCode::Char('i') => self.enter_image_mode(),
+            // Toggle remote image fetching
+            KeyCode::Char('I') => {
+                self.fetch_remote_images = !self.fetch_remote_images;
+                self.status_message = Some(if self.fetch_remote_images {
+                    "Remote images: enabled".to_string()
+                } else {
+                    "Remote images: disabled".to_string()
+                });
+                self.refresh_requested = true;
+            }
+            // Toggle remote markdown link following
+            KeyCode::Char('L') => {
+                self.fetch_remote_markdown = !self.fetch_remote_markdown;
+                self.status_message = Some(if self.fetch_remote_markdown {
+                    "Remote markdown: enabled".to_string()
+                } else {
+                    "Remote markdown: disabled".to_string()
+                });
+            }
+            // Toggle LaTeX pixel rendering
+            KeyCode::Char('T') => {
+                self.math_images_enabled = !self.math_images_enabled;
+                self.status_message = Some(if self.math_images_enabled {
+                    "Math images: enabled".to_string()
+                } else {
+                    "Math images: disabled".to_string()
+                });
+                self.refresh_requested = true;
+            }
+            // Go back to previous document
+            KeyCode::Backspace if !self.nav_history.is_empty() => {
+                self.back_requested = true;
+            }
             // Quit
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             // Ctrl+C also quits
@@ -376,6 +537,39 @@ impl App {
     pub fn visible_range(&self) -> Range<usize> {
         let end = (self.scroll_offset + self.viewport_height).min(self.document.total_height);
         self.scroll_offset..end
+    }
+
+    /// Finds the entry index closest to the current viewport.
+    ///
+    /// Strategy:
+    /// 1. First entry already visible on screen.
+    /// 2. First entry after the viewport (forward search).
+    /// 3. Last entry before the viewport (backward search).
+    fn nearest_entry_index(&self, entries: &[impl EntryWithLine]) -> usize {
+        let range = self.visible_range();
+        // 1. Visible on screen.
+        if let Some(i) = entries.iter().position(|e| range.contains(&e.line_index())) {
+            return i;
+        }
+        // 2. Forward: first entry whose line >= viewport end.
+        let fwd = entries
+            .iter()
+            .position(|e| e.line_index() >= range.end);
+        // 3. Backward: last entry whose line < viewport start.
+        let bwd = entries
+            .iter()
+            .rposition(|e| e.line_index() < range.start);
+        match (fwd, bwd) {
+            (Some(f), Some(b)) => {
+                // Pick whichever is closer to the viewport.
+                let fwd_dist = entries[f].line_index().saturating_sub(range.end);
+                let bwd_dist = range.start.saturating_sub(entries[b].line_index());
+                if fwd_dist <= bwd_dist { f } else { b }
+            }
+            (Some(f), None) | (None, Some(f)) => f,
+            // Every list is non-empty at call sites, so this is unreachable.
+            (None, None) => 0,
+        }
     }
 
     /// Scrolls down by `n` lines, clamped to the maximum scroll position.
@@ -531,6 +725,43 @@ impl App {
         }
     }
 
+    /// Handles key input while in goto-line mode (`:`).
+    ///
+    /// Only digits are accepted. Enter jumps to the line; Esc/Backspace on empty
+    /// cancels. Line numbers are 1-based (user-facing) and clamped to valid range.
+    fn handle_goto_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.goto_input = None,
+            KeyCode::Enter => {
+                if let Some(ref input) = self.goto_input {
+                    if let Ok(line) = input.parse::<usize>() {
+                        if line > 0 {
+                            self.scroll_offset = (line - 1).min(self.max_scroll());
+                        }
+                    }
+                }
+                self.goto_input = None;
+            }
+            KeyCode::Backspace => {
+                if let Some(ref mut input) = self.goto_input {
+                    if input.is_empty() {
+                        self.goto_input = None;
+                    } else {
+                        input.pop();
+                    }
+                }
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if let Some(ref mut input) = self.goto_input {
+                    if input.len() < 7 {
+                        input.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Executes the search: scans all document lines for case-insensitive
     /// substring matches, populates results, and scrolls to the first match.
     fn execute_search(&mut self) {
@@ -619,6 +850,117 @@ impl App {
         }
         // If the match line is below the viewport, scroll down to put it in view.
         else if line_index >= self.scroll_offset + self.viewport_height {
+            self.scroll_offset = line_index
+                .saturating_sub(self.viewport_height / 2)
+                .min(max);
+        }
+    }
+
+    // ── Link navigation ──────────────────────────────────────────────────────
+
+    /// Enters link navigation mode (only when document has links).
+    ///
+    /// Selects the first link that is already visible on screen.
+    /// If none is visible, searches forward from viewport bottom, then
+    /// backward from viewport top (nearest entry wins).
+    fn enter_link_mode(&mut self) {
+        if self.document.links.is_empty() {
+            return;
+        }
+        log::debug!("entering link mode ({} links)", self.document.links.len());
+        self.link_mode = true;
+        self.link_selected = self.nearest_entry_index(&self.document.links);
+        self.scroll_to_selected_link();
+    }
+
+    /// Selects the next link (wraps around).
+    fn link_select_next(&mut self) {
+        if !self.document.links.is_empty() {
+            self.link_selected = (self.link_selected + 1) % self.document.links.len();
+            self.scroll_to_selected_link();
+        }
+    }
+
+    /// Selects the previous link (wraps around).
+    fn link_select_prev(&mut self) {
+        if !self.document.links.is_empty() {
+            self.link_selected = if self.link_selected == 0 {
+                self.document.links.len() - 1
+            } else {
+                self.link_selected - 1
+            };
+            self.scroll_to_selected_link();
+        }
+    }
+
+    /// Scrolls the viewport so the currently selected link is visible.
+    fn scroll_to_selected_link(&mut self) {
+        let line_index = match self.document.links.get(self.link_selected) {
+            Some(link) => link.line_index,
+            None => return,
+        };
+        let max = self.max_scroll();
+        if line_index < self.scroll_offset {
+            self.scroll_offset = line_index.min(max);
+        } else if line_index >= self.scroll_offset + self.viewport_height {
+            self.scroll_offset = line_index
+                .saturating_sub(self.viewport_height / 2)
+                .min(max);
+        }
+    }
+
+    // ── Image navigation ──────────────────────────────────────────────────
+
+    /// Toggles image navigation mode. Pressing `i` while already in image mode exits it.
+    ///
+    /// Selects the first image that is already visible on screen.
+    /// If none is visible, searches forward from viewport bottom, then
+    /// backward from viewport top (nearest entry wins).
+    fn enter_image_mode(&mut self) {
+        if self.image_mode {
+            log::debug!("exiting image mode");
+            self.image_mode = false;
+            return;
+        }
+        if self.document.images.is_empty() {
+            return;
+        }
+        log::debug!("entering image mode ({} images)", self.document.images.len());
+        self.image_mode = true;
+        self.image_selected = self.nearest_entry_index(&self.document.images);
+        self.scroll_to_selected_image();
+    }
+
+    /// Selects the next image (wraps around).
+    fn image_select_next(&mut self) {
+        if !self.document.images.is_empty() {
+            self.image_selected = (self.image_selected + 1) % self.document.images.len();
+            self.scroll_to_selected_image();
+        }
+    }
+
+    /// Selects the previous image (wraps around).
+    fn image_select_prev(&mut self) {
+        if !self.document.images.is_empty() {
+            self.image_selected = if self.image_selected == 0 {
+                self.document.images.len() - 1
+            } else {
+                self.image_selected - 1
+            };
+            self.scroll_to_selected_image();
+        }
+    }
+
+    /// Scrolls the viewport so the currently selected image is visible.
+    fn scroll_to_selected_image(&mut self) {
+        let line_index = match self.document.images.get(self.image_selected) {
+            Some(img) => img.line_index,
+            None => return,
+        };
+        let max = self.max_scroll();
+        if line_index < self.scroll_offset {
+            self.scroll_offset = line_index.min(max);
+        } else if line_index >= self.scroll_offset + self.viewport_height {
             self.scroll_offset = line_index
                 .saturating_sub(self.viewport_height / 2)
                 .min(max);

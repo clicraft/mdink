@@ -1,5 +1,5 @@
     use super::*;
-    use crate::layout::{DocumentLine, HeadingEntry, PreRenderedDocument};
+    use crate::layout::{DocumentLine, HeadingEntry, ImageEntry, PreRenderedDocument};
 
     fn make_doc(line_count: usize) -> PreRenderedDocument {
         let lines = (0..line_count).map(|_| DocumentLine::Empty).collect();
@@ -7,6 +7,9 @@
             lines,
             total_height: line_count,
             headings: Vec::new(),
+            links: Vec::new(),
+            images: Vec::new(),
+            inline_images: Vec::new(),
         }
     }
 
@@ -16,6 +19,7 @@
             "test.md".to_string(),
             crate::theme::default_theme(),
             PathBuf::from("."),
+            false, false, true, // fetch_remote_images, fetch_remote_markdown, math_images_enabled
         );
         app.viewport_height = viewport;
         app
@@ -125,6 +129,18 @@
         assert!(app.quit);
     }
 
+    /// Regression test: handle_key processes key events regardless of kind.
+    /// The event loop filters to KeyEventKind::Press before calling handle_key,
+    /// so handle_key itself does not need to check kind.
+    #[test]
+    fn test_app_handle_key_quit_q_with_release_kind() {
+        let mut app = make_app(10, 5);
+        let key = KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::empty(), KeyEventKind::Release);
+        // handle_key processes it — the Press filter is in the event loop, not here.
+        app.handle_key(key);
+        assert!(app.quit, "handle_key should process Release events too; filtering is the caller's job");
+    }
+
     #[test]
     fn test_app_handle_key_quit_esc() {
         let mut app = make_app(10, 5);
@@ -168,6 +184,9 @@
             lines,
             total_height: line_count,
             headings,
+            links: Vec::new(),
+            images: Vec::new(),
+            inline_images: Vec::new(),
         }
     }
 
@@ -177,6 +196,7 @@
             "test.md".to_string(),
             crate::theme::default_theme(),
             PathBuf::from("."),
+            false, false, true, // fetch_remote_images, fetch_remote_markdown, math_images_enabled
         );
         app.viewport_height = viewport;
         app
@@ -414,6 +434,9 @@
             lines,
             total_height,
             headings: Vec::new(),
+            links: Vec::new(),
+            images: Vec::new(),
+            inline_images: Vec::new(),
         }
     }
 
@@ -423,6 +446,7 @@
             "test.md".to_string(),
             crate::theme::default_theme(),
             PathBuf::from("."),
+            false, false, true, // fetch_remote_images, fetch_remote_markdown, math_images_enabled
         );
         app.viewport_height = viewport;
         app
@@ -706,4 +730,777 @@
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.search.as_ref().unwrap().query, "qj");
+    }
+
+    // ── Link navigation tests ──────────────────────────────────────
+
+    use crate::layout::LinkEntry;
+
+    fn make_doc_with_links(link_specs: Vec<(&str, usize)>) -> PreRenderedDocument {
+        let line_count = link_specs.iter().map(|(_, idx)| *idx).max().unwrap_or(0) + 1;
+        let lines = (0..line_count).map(|_| DocumentLine::Empty).collect();
+        PreRenderedDocument {
+            lines,
+            total_height: line_count,
+            headings: Vec::new(),
+            links: link_specs.into_iter().map(|(url, idx)| LinkEntry {
+                url: url.to_string(),
+                line_index: idx,
+            }).collect(),
+            images: Vec::new(),
+            inline_images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_link_mode_l_enters_when_links_exist() {
+        let doc = make_doc_with_links(vec![("https://example.com", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+        assert_eq!(app.link_selected, 0);
+    }
+
+    #[test]
+    fn test_link_mode_l_noop_when_no_links() {
+        let mut app = make_app(10, 5);
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(!app.link_mode);
+    }
+
+    #[test]
+    fn test_link_mode_tab_cycles_forward() {
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 5),
+            ("https://c.com", 10),
+        ]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert_eq!(app.link_selected, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.link_selected, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.link_selected, 2);
+
+        // Wraps around.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.link_selected, 0);
+    }
+
+    #[test]
+    fn test_link_mode_shift_tab_cycles_backward() {
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 5),
+            ("https://c.com", 10),
+        ]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert_eq!(app.link_selected, 0);
+
+        // Shift+Tab wraps to last.
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.link_selected, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.link_selected, 1);
+    }
+
+    #[test]
+    fn test_link_mode_enter_sets_follow_flag() {
+        let doc = make_doc_with_links(vec![("basic.md", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.link_follow_requested);
+    }
+
+    #[test]
+    fn test_link_mode_esc_exits() {
+        let doc = make_doc_with_links(vec![("https://example.com", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(!app.link_mode);
+        assert!(!app.quit, "Esc in link mode should not quit");
+    }
+
+    #[test]
+    fn test_link_mode_jk_still_scroll() {
+        let doc = make_doc_with_links(vec![("https://example.com", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 5;
+        app.document.total_height = 20;
+        app.document.lines = (0..20).map(|_| DocumentLine::Empty).collect();
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_back_requested_when_history_exists() {
+        let mut app = make_app(10, 5);
+        app.nav_history.push(crate::app::NavHistoryEntry {
+            source: String::new(),
+            base_path: PathBuf::from("."),
+            filename: "prev.md".to_string(),
+            scroll_offset: 3,
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        assert!(app.back_requested);
+    }
+
+    #[test]
+    fn test_back_not_requested_when_history_empty() {
+        let mut app = make_app(10, 5);
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        assert!(!app.back_requested);
+    }
+
+    #[test]
+    fn test_link_mode_scroll_to_selected() {
+        // Link at line 15, viewport height 5, start at scroll_offset 0.
+        // After entering link mode, should scroll to show link.
+        let _doc = make_doc_with_links(vec![("https://example.com", 15)]);
+        let doc = make_doc_with_links(vec![("https://example.com", 15)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 5;
+        app.document.total_height = 30;
+        app.document.links = vec![LinkEntry { url: "https://example.com".to_string(), line_index: 15 }];
+        app.document.lines = (0..30).map(|_| DocumentLine::Empty).collect();
+        assert_eq!(app.scroll_offset, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        // Link at line 15 is below viewport [0..5), so scroll should move.
+        assert!(
+            app.scroll_offset > 0,
+            "should have scrolled to show link at line 15, got offset {}",
+            app.scroll_offset
+        );
+        let range = app.visible_range();
+        assert!(range.contains(&15), "link at line 15 should be visible, range={range:?}");
+    }
+
+    // ── Image navigation tests ──────────────────────────────────────
+
+    fn make_doc_with_images(image_specs: Vec<(&str, usize)>) -> PreRenderedDocument {
+        let line_count = image_specs.iter().map(|(_, idx)| *idx).max().unwrap_or(0) + 1;
+        let lines = (0..line_count).map(|_| DocumentLine::Empty).collect();
+        PreRenderedDocument {
+            lines,
+            total_height: line_count,
+            headings: Vec::new(),
+            links: Vec::new(),
+            images: image_specs.into_iter().map(|(url, idx)| ImageEntry {
+                url: url.to_string(),
+                line_index: idx,
+            }).collect(),
+            inline_images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_image_mode_i_enters_when_images_exist() {
+        let doc = make_doc_with_images(vec![("photo.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        assert!(!app.image_mode);
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 0);
+    }
+
+    #[test]
+    fn test_image_mode_i_noop_when_no_images() {
+        let mut app = make_app(10, 5);
+        assert!(!app.image_mode);
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(!app.image_mode, "should not enter image mode when no images exist");
+    }
+
+    #[test]
+    fn test_image_mode_tab_cycles_forward() {
+        let doc = make_doc_with_images(vec![("a.png", 0), ("b.png", 1), ("c.png", 2)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 2);
+
+        // Wrap around.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 0);
+    }
+
+    #[test]
+    fn test_image_mode_shift_tab_cycles_backward() {
+        let doc = make_doc_with_images(vec![("a.png", 0), ("b.png", 1)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.image_selected, 1, "backward from 0 should wrap to last");
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.image_selected, 0);
+    }
+
+    #[test]
+    fn test_image_mode_esc_exits() {
+        let doc = make_doc_with_images(vec![("a.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(!app.image_mode);
+        assert!(!app.quit, "Esc in image mode should not quit");
+    }
+
+    #[test]
+    fn test_image_mode_enter_sets_follow_flag() {
+        let doc = make_doc_with_images(vec![("photo.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.image_follow_requested);
+    }
+
+    #[test]
+    fn test_image_mode_enter_stays_in_image_mode() {
+        // After pressing Enter to open an image, image mode should remain active.
+        let doc = make_doc_with_images(vec![("photo.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.image_mode, "Enter should not exit image mode");
+    }
+
+    #[test]
+    fn test_image_mode_i_toggles_off() {
+        // Pressing 'i' while in image mode should exit it.
+        let doc = make_doc_with_images(vec![("photo.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(!app.image_mode, "pressing 'i' again should exit image mode");
+    }
+
+    #[test]
+    fn test_image_mode_i_toggle_reenter() {
+        // Toggling off with 'i' then pressing 'i' again should re-enter image mode.
+        let doc = make_doc_with_images(vec![("photo.png", 0), ("other.png", 1)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+
+        // Enter, select second image, toggle off, toggle back on.
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.image_selected, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(!app.image_mode);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode, "re-entering image mode should work");
+        assert_eq!(app.image_selected, 0, "re-entering should reset selection to 0");
+    }
+
+    // ── Link/image mode visible-first entry tests ──────────────────────────
+
+    #[test]
+    fn test_link_mode_enters_at_first_visible_link() {
+        // Links at lines [0, 5, 10, 15, 20].
+        // Viewport at offset 8, height 5 → visible range [8, 13).
+        // Line 10 is the first visible link → link_selected = 2.
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 5),
+            ("https://c.com", 10),
+            ("https://d.com", 15),
+            ("https://e.com", 20),
+        ]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 25;
+        app.document.lines = (0..25).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 8;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+        assert_eq!(app.link_selected, 2, "should select first visible link (line 10)");
+        assert_eq!(app.scroll_offset, 8, "should not scroll — link already visible");
+    }
+
+    #[test]
+    fn test_link_mode_picks_nearer_backward_over_forward() {
+        // Links at lines [0, 2, 20]. Viewport at offset 5, height 5 → range [5, 10).
+        // No links visible. Forward: line 20. Backward: line 2.
+        // Forward dist = 20-10 = 10, backward dist = 5-2 = 3 → picks backward (index 1).
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 2),
+            ("https://c.com", 20),
+        ]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 25;
+        app.document.lines = (0..25).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 5;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+        assert_eq!(app.link_selected, 1, "should pick nearer backward link (line 2, dist 3) over forward (line 20, dist 10)");
+    }
+
+    #[test]
+    fn test_link_mode_searches_backward_when_none_visible() {
+        // Links at lines [0, 2, 4]. Viewport at offset 10, height 5 → range [10, 15).
+        // No links visible. Forward: none. Backward: line 4 (index 2, closest to viewport start).
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 2),
+            ("https://c.com", 4),
+        ]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 20;
+        app.document.lines = (0..20).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 10;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+        assert_eq!(app.link_selected, 2, "should pick last link before viewport (line 4)");
+    }
+
+    #[test]
+    fn test_link_mode_prefers_forward_over_backward_when_equal() {
+        // Links at lines [0, 20]. Viewport at offset 9, height 2 → range [9, 11).
+        // Forward: line 20 (dist 9). Backward: line 0 (dist 9). Equal → picks forward.
+        let doc = make_doc_with_links(vec![
+            ("https://a.com", 0),
+            ("https://b.com", 20),
+        ]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 2;
+        app.document.total_height = 25;
+        app.document.lines = (0..25).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 9;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+        assert_eq!(app.link_selected, 1, "equal distance → should pick forward (line 20)");
+    }
+
+    #[test]
+    fn test_image_mode_enters_at_first_visible_image() {
+        // Images at lines [0, 3, 7, 12, 18].
+        // Viewport at offset 5, height 5 → visible range [5, 10).
+        // Line 7 is the first visible image → image_selected = 2.
+        let doc = make_doc_with_images(vec![
+            ("a.png", 0),
+            ("b.png", 3),
+            ("c.png", 7),
+            ("d.png", 12),
+            ("e.png", 18),
+        ]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 25;
+        app.document.lines = (0..25).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 5;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 2, "should select first visible image (line 7)");
+        assert_eq!(app.scroll_offset, 5, "should not scroll — image already visible");
+    }
+
+    #[test]
+    fn test_image_mode_searches_forward_when_none_visible() {
+        // Images at lines [0, 15]. Viewport at offset 5, height 5 → range [5, 10).
+        // No images visible. Forward: line 15 (dist 5). Backward: line 0 (dist 5).
+        // Equal distance → picks forward (index 1).
+        let doc = make_doc_with_images(vec![("a.png", 0), ("b.png", 15)]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 25;
+        app.document.lines = (0..25).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 5;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 1, "equal distance → should pick forward image (line 15)");
+    }
+
+    #[test]
+    fn test_image_mode_searches_backward_when_none_visible() {
+        // Images at lines [0, 1]. Viewport at offset 10, height 5 → range [10, 15).
+        // No images visible. Forward: none. Backward: line 1 (index 1, closest).
+        let doc = make_doc_with_images(vec![("a.png", 0), ("b.png", 1)]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 20;
+        app.document.lines = (0..20).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 10;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 1, "should pick last image before viewport (line 1)");
+    }
+
+    #[test]
+    fn test_image_mode_toggle_reenter_uses_visible_image() {
+        // Images at lines [0, 5, 10].
+        // Scroll to line 5, enter image mode → selects index 1 (line 5 is visible).
+        // Toggle off, toggle back on → should again select index 1.
+        let doc = make_doc_with_images(vec![("a.png", 0), ("b.png", 5), ("c.png", 10)]);
+        let mut app = App::new(
+            doc,
+            "test.md".to_string(),
+            crate::theme::default_theme(),
+            PathBuf::from("."),
+            false, false, true,
+        );
+        app.viewport_height = 5;
+        app.document.total_height = 15;
+        app.document.lines = (0..15).map(|_| DocumentLine::Empty).collect();
+        app.scroll_offset = 3;
+
+        // Enter: visible range [3, 8) → line 5 is first visible → index 1.
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 1, "should select first visible image (line 5)");
+
+        // Toggle off.
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(!app.image_mode);
+
+        // Re-enter: same viewport → same result.
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+        assert_eq!(app.image_selected, 1, "re-entering should still select first visible image");
+    }
+
+    // ── Toggle shortcut tests (I/L/T) ──────────────────────────────────────
+
+    #[test]
+    fn test_toggle_remote_images_shortcut() {
+        let doc = make_doc(5);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), true, false, true);
+        app.viewport_height = 10;
+        assert!(app.fetch_remote_images);
+
+        // Press 'I' → disables remote images
+        app.handle_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::NONE));
+        assert!(!app.fetch_remote_images);
+        assert_eq!(app.status_message.as_deref(), Some("Remote images: disabled"));
+        assert!(app.refresh_requested);
+
+        // Press 'I' again → re-enables
+        app.refresh_requested = false;
+        app.handle_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::NONE));
+        assert!(app.fetch_remote_images);
+        assert_eq!(app.status_message.as_deref(), Some("Remote images: enabled"));
+        assert!(app.refresh_requested);
+    }
+
+    #[test]
+    fn test_toggle_remote_markdown_shortcut() {
+        let doc = make_doc(5);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        assert!(!app.fetch_remote_markdown);
+
+        // Press 'L' → enables remote markdown
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        assert!(app.fetch_remote_markdown);
+        assert_eq!(app.status_message.as_deref(), Some("Remote markdown: enabled"));
+        assert!(!app.refresh_requested, "L should NOT trigger re-parse");
+
+        // Press 'L' again → disables
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        assert!(!app.fetch_remote_markdown);
+        assert_eq!(app.status_message.as_deref(), Some("Remote markdown: disabled"));
+    }
+
+    #[test]
+    fn test_toggle_math_images_shortcut() {
+        let doc = make_doc(5);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 10;
+        assert!(app.math_images_enabled);
+
+        // Press 'T' → disables math images
+        app.handle_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(!app.math_images_enabled);
+        assert_eq!(app.status_message.as_deref(), Some("Math images: disabled"));
+        assert!(app.refresh_requested);
+
+        // Press 'T' again → re-enables
+        app.refresh_requested = false;
+        app.handle_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(app.math_images_enabled);
+        assert_eq!(app.status_message.as_deref(), Some("Math images: enabled"));
+        assert!(app.refresh_requested);
+    }
+
+    #[test]
+    fn test_toggle_shortcuts_no_conflict_with_lowercase() {
+        let doc = make_doc(5);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), true, false, true);
+        app.viewport_height = 10;
+
+        // 'I' should toggle remote images, NOT enter image mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::NONE));
+        assert!(!app.fetch_remote_images);
+        assert!(!app.image_mode, "'I' should not enter image mode");
+
+        // 'L' should toggle remote markdown, NOT enter link mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        assert!(app.fetch_remote_markdown);
+        assert!(!app.link_mode, "'L' should not enter link mode");
+
+        // 'T' should toggle math images, NOT cycle theme
+        app.handle_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(!app.math_images_enabled);
+        assert!(!app.theme_cycle_requested, "'T' should not cycle theme");
+    }
+
+    // ── Navigation error handling tests ────────────────────────────
+
+    #[test]
+    fn test_nav_history_entry_preserves_scroll_offset() {
+        // Verify NavHistoryEntry correctly stores the scroll offset
+        // so that back-navigation restores it.
+        let entry = crate::app::NavHistoryEntry {
+            source: "# Hello".to_string(),
+            base_path: PathBuf::from("/some/dir"),
+            filename: "prev.md".to_string(),
+            scroll_offset: 42,
+        };
+        assert_eq!(entry.scroll_offset, 42);
+        assert_eq!(entry.filename, "prev.md");
+        assert_eq!(entry.source, "# Hello");
+    }
+
+    #[test]
+    fn test_link_follow_requested_set_in_link_mode() {
+        // When in link mode and Enter is pressed, link_follow_requested is set.
+        // Note: link_mode is cleared by the event loop in main.rs, not by App.
+        let doc = make_doc_with_links(vec![("local.md", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 5;
+
+        // Enter link mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert!(app.link_mode);
+
+        // Press Enter to follow the link
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.link_follow_requested);
+        // link_mode stays true until the event loop clears it
+    }
+
+    #[test]
+    fn test_image_follow_requested_set_in_image_mode() {
+        // When in image mode and Enter is pressed, image_follow_requested is set.
+        let doc = make_doc_with_images(vec![("photo.png", 0)]);
+        let mut app = App::new(doc, "test.md".to_string(), crate::theme::default_theme(), PathBuf::from("."), false, false, true);
+        app.viewport_height = 5;
+
+        // Enter image mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert!(app.image_mode);
+
+        // Press Enter to open the image
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.image_follow_requested);
+    }
+
+    // ── Goto-line mode tests ──────────────────────────────────────────────────
+
+    fn goto_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty())
+    }
+
+    #[test]
+    fn test_goto_colon_enters_mode() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        assert!(app.goto_input.is_some());
+    }
+
+    #[test]
+    fn test_goto_accepts_digits() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('4'));
+        app.handle_key(goto_key('2'));
+        assert_eq!(app.goto_input.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn test_goto_ignores_non_digits() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('a'));
+        app.handle_key(goto_key(' '));
+        assert_eq!(app.goto_input.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_goto_esc_cancels() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('4'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.goto_input.is_none());
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_goto_backspace_on_empty_cancels() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        assert!(app.goto_input.is_none());
+    }
+
+    #[test]
+    fn test_goto_backspace_removes_digit() {
+        let mut app = make_app(100, 10);
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('4'));
+        app.handle_key(goto_key('2'));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        assert_eq!(app.goto_input.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn test_goto_enter_scrolls_to_line() {
+        let mut app = make_app(100, 10);
+        // max_scroll = 100 - 10 = 90
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('5'));
+        app.handle_key(goto_key('0'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.goto_input.is_none());
+        // Line 50 → offset = 49
+        assert_eq!(app.scroll_offset, 49);
+    }
+
+    #[test]
+    fn test_goto_line_1_scrolls_to_top() {
+        let mut app = make_app(100, 10);
+        app.scroll_offset = 50;
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('1'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_goto_line_clamped_to_max_scroll() {
+        let mut app = make_app(100, 10);
+        // max_scroll = 90
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('9'));
+        app.handle_key(goto_key('9'));
+        app.handle_key(goto_key('9'));
+        app.handle_key(goto_key('9'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.goto_input.is_none());
+        assert_eq!(app.scroll_offset, 90);
+    }
+
+    #[test]
+    fn test_goto_empty_enter_does_nothing() {
+        let mut app = make_app(100, 10);
+        app.scroll_offset = 42;
+        app.handle_key(goto_key(':'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.goto_input.is_none());
+        assert_eq!(app.scroll_offset, 42);
+    }
+
+    #[test]
+    fn test_goto_zero_does_nothing() {
+        let mut app = make_app(100, 10);
+        app.scroll_offset = 42;
+        app.handle_key(goto_key(':'));
+        app.handle_key(goto_key('0'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.scroll_offset, 42);
     }

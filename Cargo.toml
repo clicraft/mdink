@@ -16,6 +16,9 @@ exclude = ["xtask/", "plans/", "testdata/", "packaging/", "assets/completions/",
 members = ["xtask"]
 
 [dependencies]
+# Logging
+log = "0.4"
+env_logger = { version = "0.11", optional = true }
 # Phase 1
 ratatui = { version = "0.30", features = ["crossterm"] }
 pulldown-cmark = { version = "0.13", features = ["simd"] }
@@ -38,6 +41,17 @@ ureq = "3"
 printpdf = "0.7"
 toml = "0.8"
 ttf-parser = "0.24"
+# LaTeX math → pixel rendering
+ratex-parser = "0.1.2"
+ratex-layout = "0.1.2"
+ratex-types = "0.1.2"
+ratex-svg = { version = "0.1.2", features = ["standalone"] }
+ratex-katex-fonts = "0.1.2"
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+
+[features]
+default = []
+logging = ["dep:env_logger"]
 
 # ── Release profile ──────────────────────────────────────────────
 [profile.release]

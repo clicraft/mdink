@@ -15,8 +15,19 @@ pub struct Config {
     pub style: Option<String>,
     pub no_images: Option<bool>,
     pub ascii_images: Option<bool>,
+    pub fetch_remote_images: Option<bool>,
+    pub fetch_remote_markdown: Option<bool>,
     pub no_color: Option<bool>,
     pub pdf_font: Option<String>,
+    /// When false, disables pixel rendering of LaTeX formulas.
+    /// Default (absent): true (rendering enabled).
+    pub math_images: Option<bool>,
+    /// Log level: off, error, warn, info, debug, trace.
+    #[cfg(feature = "logging")]
+    pub log_level: Option<String>,
+    /// Path to write log output.
+    #[cfg(feature = "logging")]
+    pub log_file: Option<String>,
 }
 
 /// Loads the config file, returning defaults on any failure.
@@ -34,7 +45,7 @@ pub fn load_config() -> Config {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
         Err(e) => {
-            eprintln!("warning: cannot read {}: {e}", path.display());
+            log::warn!("cannot read {}: {e}", path.display());
             return Config::default();
         }
     };
@@ -42,7 +53,7 @@ pub fn load_config() -> Config {
     match serde_json::from_str(&content) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("warning: invalid config {}: {e}", path.display());
+            log::warn!("invalid config {}: {e}", path.display());
             Config::default()
         }
     }

@@ -12,6 +12,8 @@
             text: text.to_string(),
             style: Style::default(),
             url: None,
+            math_latex: String::new(),
+            math_image: None,
         }
     }
 
@@ -20,6 +22,8 @@
             text: text.to_string(),
             style,
             url: None,
+            math_latex: String::new(),
+            math_image: None,
         }
     }
 
@@ -697,6 +701,7 @@
     fn test_layout_image_fallback_produces_text() {
         let blocks = vec![RenderedBlock::ImageFallback {
             alt_text: "a photo".to_string(),
+            src_url: "photo.png".to_string(),
         }];
         let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 1);
@@ -712,12 +717,64 @@
     }
 
     #[test]
+    fn test_layout_image_fallback_shows_src_url() {
+        // When the image can't be loaded, the fallback should show the src_url
+        // so the user can see which file was missing.
+        let blocks = vec![RenderedBlock::ImageFallback {
+            alt_text: "my diagram".to_string(),
+            src_url: "images/diagram.png".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        if let DocumentLine::Text(line) = &doc.lines[0] {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains("images/diagram.png"),
+                "fallback should show src_url, got: {text}"
+            );
+            assert!(
+                text.contains("my diagram"),
+                "fallback should still contain alt text, got: {text}"
+            );
+        } else {
+            panic!("expected Text line for ImageFallback");
+        }
+    }
+
+    #[test]
+    fn test_layout_image_fallback_empty_alt_shows_src_url() {
+        // When alt_text is empty, the fallback should still be informative by
+        // showing the src_url.
+        let blocks = vec![RenderedBlock::ImageFallback {
+            alt_text: String::new(),
+            src_url: "missing.png".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        if let DocumentLine::Text(line) = &doc.lines[0] {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains("missing.png"),
+                "fallback with empty alt should show src_url, got: {text}"
+            );
+            // Should not have the empty parentheses pattern " ()"
+            assert!(
+                !text.contains(" ()"),
+                "fallback should not show empty parentheses, got: {text}"
+            );
+        } else {
+            panic!("expected Text line for ImageFallback");
+        }
+    }
+
+    #[test]
     fn test_layout_image_start_reserves_height() {
         let blocks = vec![RenderedBlock::Image {
             protocol_index: 0,
             alt_text: "test".to_string(),
+            src_url: "test.png".to_string(),
             width_cells: 16,
             height_cells: 5,
+            px_width: 128,
+            px_height: 80,
         }];
         let doc = flatten_default(&blocks,80);
         assert_eq!(doc.total_height, 5, "image should reserve height_cells lines");
@@ -810,6 +867,7 @@
         let blocks = vec![RenderedBlock::AsciiImage {
             lines,
             alt_text: "test".to_string(),
+            src_url: "test.png".to_string(),
         }];
         let doc = flatten_default(&blocks, 80);
         assert_eq!(doc.total_height, 2, "each image line becomes a DocumentLine");
@@ -883,6 +941,7 @@
                 TableCell::Block(RenderedBlock::AsciiImage {
                     lines: image_lines,
                     alt_text: "test".to_string(),
+                    src_url: "test.png".to_string(),
                 }),
             ]],
         }];
@@ -915,6 +974,7 @@
             rows: vec![vec![TableCell::Block(RenderedBlock::AsciiImage {
                 lines: vec![wide_line],
                 alt_text: "wide".to_string(),
+                src_url: "wide.png".to_string(),
             })]],
         }];
         // Use a narrow terminal (15 cols) so the image must be truncated.
@@ -972,6 +1032,7 @@
                 TableCell::Block(RenderedBlock::AsciiImage {
                     lines: image_lines,
                     alt_text: "synth".to_string(),
+                    src_url: "synth.png".to_string(),
                 }),
             ]],
         }];
@@ -1037,10 +1098,12 @@
                 TableCell::Block(RenderedBlock::AsciiImage {
                     lines: short_img,
                     alt_text: "s".to_string(),
+                    src_url: "s.png".to_string(),
                 }),
                 TableCell::Block(RenderedBlock::AsciiImage {
                     lines: tall_img,
                     alt_text: "t".to_string(),
+                    src_url: "t.png".to_string(),
                 }),
             ]],
         }];
@@ -1093,6 +1156,7 @@
             rows: vec![vec![
                 TableCell::Block(RenderedBlock::ImageFallback {
                     alt_text: "photo".to_string(),
+                    src_url: "photo.png".to_string(),
                 }),
                 make_cell("sunset"),
             ]],
@@ -1103,8 +1167,8 @@
         if let DocumentLine::Text(row_line) = &doc.lines[2] {
             let text: String = row_line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
-                text.contains("[image: photo]"),
-                "fallback cell should render as '[image: photo]', got: {text:?}"
+                text.contains("[image: photo (photo.png)]"),
+                "fallback cell should render as '[image: photo (photo.png)]', got: {text:?}"
             );
             assert!(
                 text.contains("sunset"),
@@ -1123,6 +1187,7 @@
             rows: vec![vec![TableCell::Block(RenderedBlock::AsciiImage {
                 lines: vec![],
                 alt_text: "empty".to_string(),
+                src_url: "empty.png".to_string(),
             })]],
         }];
         let doc = flatten_default(&blocks, 40);
@@ -1144,6 +1209,8 @@
                 text: "click".to_string(),
                 style: Style::default(),
                 url: Some("https://example.com".to_string()),
+                math_latex: String::new(),
+            math_image: None,
             }],
         }];
         let doc = flatten_default(&blocks, 80);
@@ -1187,6 +1254,8 @@
                 text: "x".to_string(),
                 style: Style::default(),
                 url: Some("https://evil.com/\x1b[31mred".to_string()),
+                math_latex: String::new(),
+            math_image: None,
             }],
         }];
         let doc = flatten_default(&blocks, 80);
@@ -1237,6 +1306,8 @@
                     text: "Rust documentation".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://doc.rust-lang.org".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
             ],
         }];
@@ -1253,18 +1324,24 @@
                     text: "GitHub".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://github.com".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
                 plain_span(" and "),
                 StyledSpan {
                     text: "crates.io".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://crates.io".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
                 plain_span(" and "),
                 StyledSpan {
                     text: "docs.rs".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://docs.rs".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
                 plain_span("."),
             ],
@@ -1283,11 +1360,15 @@
                         .add_modifier(Modifier::ITALIC)
                         .add_modifier(Modifier::BOLD),
                     url: Some("https://example.com/release".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
                 StyledSpan {
                     text: " release notes".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://example.com/release".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
             ],
         }];
@@ -1304,6 +1385,8 @@
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::ITALIC),
                 url: Some("https://doc.rust-lang.org/cargo/".to_string()),
+            math_latex: String::new(),
+            math_image: None,
             }],
         }];
         let doc = flatten_default(&blocks, 80);
@@ -1317,6 +1400,8 @@
                 text: "https://example.com".to_string(),
                 style: Style::default().add_modifier(Modifier::ITALIC),
                 url: Some("https://example.com".to_string()),
+            math_latex: String::new(),
+            math_image: None,
             }],
         }];
         let doc = flatten_default(&blocks, 80);
@@ -1332,6 +1417,8 @@
                     text: "a very long link text that should wrap across lines to verify italic modifier is preserved through wrapping".to_string(),
                     style: Style::default().add_modifier(Modifier::ITALIC),
                     url: Some("https://example.com".to_string()),
+                math_latex: String::new(),
+            math_image: None,
                 },
                 plain_span(" end."),
             ],
@@ -1357,8 +1444,557 @@
             80,
             true,  // no_images — skip image loading
             false,
+            false, // fetch_remote
         );
-        let blocks = crate::parser::parse(source, &HL, &mut im, &theme);
+        let blocks = crate::parser::parse(source, &HL, &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let doc = crate::layout::flatten(&blocks, 80, &theme);
         assert_no_escape_sequences(&doc);
+    }
+
+    // ── Link extraction tests ─────────────────────────────────────
+
+    fn link_span(text: &str, url: &str) -> StyledSpan {
+        StyledSpan {
+            text: text.to_string(),
+            style: Style::default(),
+            url: Some(url.to_string()),
+        math_latex: String::new(),
+            math_image: None,
+        }
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_paragraph_one_link() {
+        let block = RenderedBlock::Paragraph {
+            content: vec![link_span("click", "https://example.com")],
+        };
+        let links = super::extract_block_links(&block);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], "https://example.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_paragraph_multiple_links() {
+        let block = RenderedBlock::Paragraph {
+            content: vec![
+                link_span("a", "https://a.com"),
+                plain_span(" and "),
+                link_span("b", "https://b.com"),
+                plain_span(" and "),
+                link_span("c", "https://c.com"),
+            ],
+        };
+        let links = super::extract_block_links(&block);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], "https://a.com");
+        assert_eq!(links[1], "https://b.com");
+        assert_eq!(links[2], "https://c.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_paragraph_no_links() {
+        let block = RenderedBlock::Paragraph {
+            content: vec![plain_span("just text")],
+        };
+        let links = super::extract_block_links(&block);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_nested_list() {
+        use crate::parser::ListItem;
+        let inner_item = ListItem {
+            content: vec![link_span("inner link", "https://inner.com")],
+            children: vec![],
+            task: None,
+        };
+        let outer_item = ListItem {
+            content: vec![link_span("outer link", "https://outer.com")],
+            children: vec![RenderedBlock::List {
+                ordered: false,
+                start: 1,
+                items: vec![inner_item],
+            }],
+            task: None,
+        };
+        let block = RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![outer_item],
+        };
+        let links = super::extract_block_links(&block);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], "https://outer.com");
+        assert_eq!(links[1], "https://inner.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_block_quote() {
+        let block = RenderedBlock::BlockQuote {
+            children: vec![
+                RenderedBlock::Paragraph {
+                    content: vec![link_span("quoted link", "https://quote.com")],
+                },
+            ],
+        };
+        let links = super::extract_block_links(&block);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], "https://quote.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_code_block_empty() {
+        let block = RenderedBlock::CodeBlock {
+            language: "rust".to_string(),
+            highlighted_lines: vec![],
+        };
+        let links = super::extract_block_links(&block);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_layout_flatten_collects_link_entries() {
+        let blocks = vec![
+            RenderedBlock::Paragraph {
+                content: vec![link_span("first", "https://a.com")],
+            },
+            RenderedBlock::Paragraph {
+                content: vec![link_span("second", "https://b.com")],
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 2);
+        assert_eq!(doc.links[0].url, "https://a.com");
+        assert_eq!(doc.links[0].line_index, 0);
+        assert_eq!(doc.links[1].url, "https://b.com");
+        // Second paragraph starts at line 2 (para line + empty spacer).
+        assert_eq!(doc.links[1].line_index, 2);
+    }
+
+    #[test]
+    fn test_layout_flatten_empty_doc_no_links() {
+        let doc = flatten_default(&[], 80);
+        assert!(doc.links.is_empty());
+    }
+
+    #[test]
+    fn test_layout_flatten_heading_link_collected() {
+        let blocks = vec![RenderedBlock::Heading {
+            level: 1,
+            content: vec![link_span("linked heading", "https://heading.com")],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].url, "https://heading.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_table_header_and_body() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![
+                TableCell::Text(vec![link_span("Docs", "https://docs.com")]),
+                make_cell("Info"),
+            ],
+            alignments: vec![pulldown_cmark::Alignment::None, pulldown_cmark::Alignment::None],
+            rows: vec![vec![
+                make_cell("val"),
+                TableCell::Text(vec![link_span("repo", "https://repo.com")]),
+            ]],
+        }];
+        let links = super::extract_block_links(&blocks[0]);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], "https://docs.com");
+        assert_eq!(links[1], "https://repo.com");
+    }
+
+    #[test]
+    fn test_layout_extract_block_links_table_no_links() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("A"), make_cell("B")],
+            alignments: vec![pulldown_cmark::Alignment::None, pulldown_cmark::Alignment::None],
+            rows: vec![vec![make_cell("1"), make_cell("2")]],
+        }];
+        let links = super::extract_block_links(&blocks[0]);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_layout_flatten_table_links_collected() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![TableCell::Text(vec![link_span("Link", "https://table.com")])],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![make_cell("data")]],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].url, "https://table.com");
+        // Header row starts at line 0.
+        assert_eq!(doc.links[0].line_index, 0);
+    }
+
+    #[test]
+    fn test_layout_flatten_table_body_link_correct_line_index() {
+        // Link in a body row should point to the body row line, not the header.
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("Col")],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![TableCell::Text(vec![link_span("repo", "https://repo.com")])]],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].url, "https://repo.com");
+        // Header(0) + separator(1) + body row(2) → link at line 2.
+        assert_eq!(doc.links[0].line_index, 2);
+    }
+
+    #[test]
+    fn test_layout_flatten_table_header_and_body_links_different_lines() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![TableCell::Text(vec![link_span("Docs", "https://docs.com")])],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![vec![TableCell::Text(vec![link_span("repo", "https://repo.com")])]],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 2);
+        // Header link at line 0.
+        assert_eq!(doc.links[0].url, "https://docs.com");
+        assert_eq!(doc.links[0].line_index, 0);
+        // Body link at line 2 (header + separator).
+        assert_eq!(doc.links[1].url, "https://repo.com");
+        assert_eq!(doc.links[1].line_index, 2);
+    }
+
+    #[test]
+    fn test_layout_flatten_table_multi_row_links() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![make_cell("A")],
+            alignments: vec![pulldown_cmark::Alignment::None],
+            rows: vec![
+                vec![TableCell::Text(vec![link_span("first", "https://first.com")])],
+                vec![TableCell::Text(vec![link_span("second", "https://second.com")])],
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 2);
+        // Row 1 at line 2 (header + sep).
+        assert_eq!(doc.links[0].url, "https://first.com");
+        assert_eq!(doc.links[0].line_index, 2);
+        // Row 2 at line 3.
+        assert_eq!(doc.links[1].url, "https://second.com");
+        assert_eq!(doc.links[1].line_index, 3);
+    }
+
+    // ── List link highlighting tests ────────────────────────────────
+
+    #[test]
+    fn test_layout_list_single_link_line_index() {
+        // List with one item containing a link. The link's line_index should
+        // point to the item's first line, not some unrelated line.
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![ListItem {
+                content: vec![link_span("click", "https://example.com")],
+                children: vec![],
+                task: None,
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].url, "https://example.com");
+        // The only list item is at line 0.
+        assert_eq!(doc.links[0].line_index, 0);
+    }
+
+    #[test]
+    fn test_layout_list_multi_item_links_correct_line_indices() {
+        // Three list items, each with a link. Each link should point to the
+        // line where its item starts, not all to line 0.
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![
+                ListItem {
+                    content: vec![link_span("first", "https://first.com")],
+                    children: vec![],
+                    task: None,
+                },
+                ListItem {
+                    content: vec![link_span("second", "https://second.com")],
+                    children: vec![],
+                    task: None,
+                },
+                ListItem {
+                    content: vec![link_span("third", "https://third.com")],
+                    children: vec![],
+                    task: None,
+                },
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 3);
+        // Each item occupies exactly one line (content is short, no wrapping).
+        assert_eq!(doc.links[0].url, "https://first.com");
+        assert_eq!(doc.links[0].line_index, 0);
+        assert_eq!(doc.links[1].url, "https://second.com");
+        assert_eq!(doc.links[1].line_index, 1);
+        assert_eq!(doc.links[2].url, "https://third.com");
+        assert_eq!(doc.links[2].line_index, 2);
+    }
+
+    #[test]
+    fn test_layout_list_link_after_paragraph() {
+        // Paragraph followed by a list with a link. The list link should
+        // point to the list item line, not the paragraph line.
+        let blocks = vec![
+            RenderedBlock::Paragraph {
+                content: vec![plain_span("Intro text.")],
+            },
+            RenderedBlock::List {
+                ordered: false,
+                start: 1,
+                items: vec![ListItem {
+                    content: vec![link_span("doc", "doc.md")],
+                    children: vec![],
+                    task: None,
+                }],
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        // Paragraph = 1 line, empty spacer = 1 line, list item = 1 line.
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].url, "doc.md");
+        assert_eq!(doc.links[0].line_index, 2, "list link should be at line 2 (after paragraph + spacer)");
+    }
+
+    #[test]
+    fn test_layout_list_nested_links_correct_indices() {
+        // Outer list with 2 items; first item has a child list with a link.
+        // The nested link should point to the nested item's line, not the
+        // outer list's first line.
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![
+                ListItem {
+                    content: vec![link_span("outer", "outer.md")],
+                    children: vec![RenderedBlock::List {
+                        ordered: false,
+                        start: 1,
+                        items: vec![ListItem {
+                            content: vec![link_span("inner", "inner.md")],
+                            children: vec![],
+                            task: None,
+                        }],
+                    }],
+                    task: None,
+                },
+                ListItem {
+                    content: vec![link_span("last", "last.md")],
+                    children: vec![],
+                    task: None,
+                },
+            ],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.links.len(), 3);
+        // Item 0 → line 0
+        assert_eq!(doc.links[0].url, "outer.md");
+        assert_eq!(doc.links[0].line_index, 0);
+        // Nested item → line 1 (indented under item 0)
+        assert_eq!(doc.links[1].url, "inner.md");
+        assert_eq!(doc.links[1].line_index, 1);
+        // Item 1 → line 2
+        assert_eq!(doc.links[2].url, "last.md");
+        assert_eq!(doc.links[2].line_index, 2);
+    }
+
+    // ── ImagePending layout tests ─────────────────────────────────────
+
+    #[test]
+    fn test_layout_image_pending_produces_text_placeholder() {
+        let blocks = vec![RenderedBlock::ImagePending {
+            url: "https://example.com/img.png".to_string(),
+            alt_text: "example image".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert!(!doc.lines.is_empty(), "ImagePending should produce at least one line");
+        let line = &doc.lines[0];
+        // Should contain the placeholder text with alt_text.
+        let text: String = match line {
+            DocumentLine::Text(spans) => spans.iter().map(|s| s.content.as_ref()).collect(),
+            _ => panic!("expected Text line"),
+        };
+        assert!(text.contains("[loading: example image]"), "placeholder should contain alt text, got: {text}");
+    }
+
+    #[test]
+    fn test_layout_image_pending_in_table() {
+        let blocks = vec![RenderedBlock::Table {
+            headers: vec![TableCell::Block(RenderedBlock::ImagePending {
+                url: "https://example.com/icon.png".to_string(),
+                alt_text: "icon".to_string(),
+            })],
+            alignments: vec![Alignment::Left],
+            rows: vec![],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        // Should produce at least the separator line + header row.
+        assert!(!doc.lines.is_empty(), "table with ImagePending should produce lines");
+        // No panic during layout = success.
+    }
+
+    #[test]
+    fn test_layout_image_pending_no_links() {
+        let block = RenderedBlock::ImagePending {
+            url: "https://example.com/img.png".to_string(),
+            alt_text: "example".to_string(),
+        };
+        let links = extract_block_links(&block);
+        assert!(links.is_empty(), "ImagePending should produce no link entries");
+    }
+
+    // ── Image entry collection tests ─────────────────────────────────
+
+    #[test]
+    fn test_layout_image_entry_collected_for_image_fallback() {
+        let blocks = vec![RenderedBlock::ImageFallback {
+            alt_text: "photo".to_string(),
+            src_url: "photo.png".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.images.len(), 1, "ImageFallback should produce one ImageEntry");
+        assert_eq!(doc.images[0].url, "photo.png");
+        assert_eq!(doc.images[0].line_index, 0);
+    }
+
+    #[test]
+    fn test_layout_image_entry_collected_for_image_pending() {
+        let blocks = vec![RenderedBlock::ImagePending {
+            url: "https://example.com/img.png".to_string(),
+            alt_text: "remote".to_string(),
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.images.len(), 1, "ImagePending should produce one ImageEntry");
+        assert_eq!(doc.images[0].url, "https://example.com/img.png");
+    }
+
+    #[test]
+    fn test_layout_image_entry_in_list() {
+        use crate::parser::ListItem;
+        let blocks = vec![RenderedBlock::List {
+            ordered: false,
+            start: 1,
+            items: vec![ListItem {
+                content: vec![plain_span("text")],
+                children: vec![RenderedBlock::ImageFallback {
+                    alt_text: "nested".to_string(),
+                    src_url: "nested.png".to_string(),
+                }],
+                task: None,
+            }],
+        }];
+        let doc = flatten_default(&blocks, 80);
+        assert_eq!(doc.images.len(), 1, "image inside list should be collected");
+        assert_eq!(doc.images[0].url, "nested.png");
+    }
+
+    #[test]
+    fn test_layout_no_image_entry_for_text_blocks() {
+        let blocks = vec![
+            RenderedBlock::Heading { level: 1, content: vec![plain_span("Title")] },
+            RenderedBlock::Paragraph { content: vec![plain_span("text")] },
+            RenderedBlock::ThematicBreak,
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert!(doc.images.is_empty(), "text blocks should produce no ImageEntry");
+    }
+
+    // ── Math layout tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_layout_math_unicode_wraps_like_paragraph() {
+        use crate::parser::StyledSpan;
+        let style = ratatui::style::Style::default();
+        let content = "x = mc^2 with a very long explanation that should be wrapped across multiple lines when the terminal width is narrow"
+            .to_string();
+        let blocks = vec![
+            RenderedBlock::MathUnicode {
+                content: vec![StyledSpan {
+                    text: format!("$${content}$$"),
+                    style,
+                    url: None,
+                    math_latex: String::new(),
+            math_image: None,
+                }],
+                raw_latex: "x = mc^2 ...".to_string(),
+            },
+        ];
+        let doc = flatten_default(&blocks, 40);
+        // MathUnicode wraps like Paragraph → should produce multiple Text lines.
+        assert!(doc.lines.len() > 1, "long MathUnicode should wrap to multiple lines");
+        // All lines should be Text (not ImageStart).
+        for line in &doc.lines {
+            assert!(matches!(line, DocumentLine::Text(_)), "MathUnicode should produce Text lines");
+        }
+    }
+
+    #[test]
+    fn test_layout_math_unicode_short_fits_one_line() {
+        use crate::parser::StyledSpan;
+        let style = ratatui::style::Style::default();
+        let blocks = vec![
+            RenderedBlock::MathUnicode {
+                content: vec![StyledSpan {
+                    text: "$$α + β$$".to_string(),
+                    style,
+                    url: None,
+                    math_latex: String::new(),
+            math_image: None,
+                }],
+                raw_latex: "\\alpha + \\beta".to_string(),
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        // Short formula → one Text line.
+        assert_eq!(doc.lines.len(), 1, "short MathUnicode should produce one line");
+    }
+
+    #[test]
+    fn test_layout_math_unicode_no_link_no_image_entries() {
+        use crate::parser::StyledSpan;
+        let style = ratatui::style::Style::default();
+        let blocks = vec![
+            RenderedBlock::MathUnicode {
+                content: vec![StyledSpan {
+                    text: "$$x^2$$".to_string(),
+                    style,
+                    url: None,
+                    math_latex: String::new(),
+            math_image: None,
+                }],
+                raw_latex: "x^2".to_string(),
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        assert!(doc.links.is_empty(), "MathUnicode should produce no LinkEntry");
+        assert!(doc.images.is_empty(), "MathUnicode should produce no ImageEntry");
+    }
+
+    #[test]
+    fn test_layout_math_image_no_link_no_image_entries() {
+        let blocks = vec![
+            RenderedBlock::MathImage {
+                protocol_index: 0,
+                width_cells: 10,
+                height_cells: 2,
+                px_width: 80,
+                px_height: 32,
+                raw_latex: "x^2".to_string(),
+            },
+        ];
+        let doc = flatten_default(&blocks, 80);
+        // MathImage produces ImageStart + ImageContinuation but no link/image entries.
+        assert!(doc.links.is_empty(), "MathImage should produce no LinkEntry");
+        assert!(doc.images.is_empty(), "MathImage should produce no ImageEntry");
     }

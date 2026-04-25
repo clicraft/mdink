@@ -252,12 +252,18 @@ fn load_theme(name: &str) -> Result<Theme, String>
 
 | Failure | Degraded behavior |
 |---------|-------------------|
-| Image file not found | Display `[image: alt_text]` |
+| Image file not found | Display `[image: alt_text (src_url)]` or `[image: src_url]` if alt is empty |
 | Unknown code language | Render as plain text (no highlighting) |
 | Theme file invalid | Fall back to built-in dark theme + warn on stderr |
 | Terminal doesn't support images | Skip images, show alt text |
 | Unicode character can't be measured | Assume width 1 |
 | Markdown has unclosed tags | `pulldown-cmark` handles this — just render what it emits |
+
+**Important:** During TUI operation (after ratatui's alternate screen is active), never use
+`eprintln!()` for warnings — it writes to stderr which corrupts the TUI display. Use the
+structured logging system (`log::warn!()`, `log::error!()`, etc.) instead, which routes
+output to a log file in Phase B. All degradation should be silent (produce fallback blocks)
+or use `app.status_message` for user-visible feedback within the TUI.
 
 ### 4.4 — Panic Policy
 

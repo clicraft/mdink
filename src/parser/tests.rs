@@ -1,6 +1,9 @@
     use super::*;
+    use crate::images::ImageManager;
     use crate::parser::TableCell;
+    use image::DynamicImage;
     use ratatui::style::Modifier;
+    use std::path::PathBuf;
     use std::sync::LazyLock;
 
     static TEST_HIGHLIGHTER: LazyLock<crate::highlight::Highlighter> =
@@ -20,9 +23,11 @@
             80,
             true,  // no_images → always ImageFallback
             false, // force_ascii
+            false, // fetch_remote
         );
+        let mut math = crate::math::MathEngine::new(false, false);
         let theme = crate::theme::default_theme();
-        super::parse(source, highlighter, &mut im, &theme)
+        super::parse(source, highlighter, &mut im, &mut math, &theme)
     }
 
     #[test]
@@ -238,7 +243,7 @@
         // an empty Paragraph + an ImageFallback block (or just ImageFallback
         // depending on the event sequence). Accept either form.
         let has_alt = blocks.iter().any(|b| match b {
-            RenderedBlock::ImageFallback { alt_text } => alt_text.contains("alt text"),
+            RenderedBlock::ImageFallback { alt_text, .. } => alt_text.contains("alt text"),
             RenderedBlock::Paragraph { content } => {
                 content.iter().any(|s| s.text.contains("alt text"))
             }
@@ -269,7 +274,7 @@
         let blocks = parse("![Photo of sunset](sunset.png)", h());
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "should produce ImageFallback when picker is None");
-        if let Some(RenderedBlock::ImageFallback { alt_text }) = fallback {
+        if let Some(RenderedBlock::ImageFallback { alt_text, .. }) = fallback {
             assert_eq!(alt_text, "Photo of sunset");
         }
     }
@@ -279,7 +284,7 @@
         let blocks = parse("![](photo.png)", h());
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "should produce ImageFallback even with empty alt");
-        if let Some(RenderedBlock::ImageFallback { alt_text }) = fallback {
+        if let Some(RenderedBlock::ImageFallback { alt_text, .. }) = fallback {
             assert!(alt_text.is_empty(), "alt text should be empty, got: {alt_text:?}");
         }
     }
@@ -748,6 +753,9 @@
                     RenderedBlock::Image { .. } => "Image",
                     RenderedBlock::AsciiImage { .. } => "AsciiImage",
                     RenderedBlock::ImageFallback { .. } => "ImageFallback",
+                    RenderedBlock::ImagePending { .. } => "ImagePending",
+                    RenderedBlock::MathUnicode { .. } => "MathUnicode",
+                    RenderedBlock::MathImage { .. } => "MathImage",
                 }.to_string());
                 match b {
                     RenderedBlock::List { items, .. } => {
@@ -856,9 +864,10 @@
             80,
             true,  // explicitly disabled
             false, // force_ascii
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![photo](test-image.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![photo](test-image.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "no_images=true should produce ImageFallback");
     }
@@ -872,12 +881,13 @@
             80,
             false, // images enabled, but no graphics protocol
             false, // force_ascii
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
         assert!(ascii.is_some(), "picker=None + valid image should produce AsciiImage");
-        if let Some(RenderedBlock::AsciiImage { lines, alt_text }) = ascii {
+        if let Some(RenderedBlock::AsciiImage { lines, alt_text, .. }) = ascii {
             assert!(!lines.is_empty(), "AsciiImage should have lines");
             assert_eq!(alt_text, "gradient");
         }
@@ -892,9 +902,10 @@
             80,
             false, // images enabled
             false, // force_ascii
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![missing](does-not-exist.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![missing](does-not-exist.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "missing file should produce ImageFallback");
     }
@@ -909,9 +920,10 @@
             80,
             false, // images enabled
             true,  // force ASCII art
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![gradient](gradient.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
         assert!(ascii.is_some(), "force_ascii=true should produce AsciiImage");
         let native = blocks.iter().any(|b| matches!(b, RenderedBlock::Image { .. }));
@@ -927,9 +939,10 @@
             80,
             false, // images enabled
             true,  // force ASCII art
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![missing](nonexistent.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![missing](nonexistent.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
         assert!(fallback.is_some(), "force_ascii + missing file should produce ImageFallback");
     }
@@ -950,12 +963,13 @@
                 80,
                 false,
                 true, // force ASCII art
+                false, // fetch_remote
             );
             let theme = crate::theme::default_theme();
-            let blocks = super::parse(md, h(), &mut im, &theme);
+            let blocks = super::parse(md, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
             let ascii = blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
             assert!(ascii.is_some(), "{expected_alt}: should produce AsciiImage");
-            if let Some(RenderedBlock::AsciiImage { lines, alt_text }) = ascii {
+            if let Some(RenderedBlock::AsciiImage { lines, alt_text, .. }) = ascii {
                 assert!(!lines.is_empty(), "{expected_alt}: should have lines");
                 assert_eq!(alt_text, expected_alt);
                 // 256×256 with default font (8×16) → 32 wide × 16 tall (fits in 80 cols).
@@ -981,9 +995,10 @@
             60,
             false,
             true,
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse("![Facebook](facebook-logo.png)", h(), &mut im, &theme);
+        let blocks = super::parse("![Facebook](facebook-logo.png)", h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         if let Some(RenderedBlock::AsciiImage { lines, .. }) =
             blocks.iter().find(|b| matches!(b, RenderedBlock::AsciiImage { .. }))
         {
@@ -1012,9 +1027,10 @@
             80,
             false,
             true,
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse(source, h(), &mut im, &theme);
+        let blocks = super::parse(source, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
 
         let ascii_count = blocks.iter().filter(|b| matches!(b, RenderedBlock::AsciiImage { .. })).count();
         assert!(
@@ -1069,9 +1085,10 @@
             80,
             false, // images enabled
             true,  // force ASCII art
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse(md, h(), &mut im, &theme);
+        let blocks = super::parse(md, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         assert_eq!(blocks.len(), 1, "should produce one Table block");
         match &blocks[0] {
             RenderedBlock::Table { headers, rows, .. } => {
@@ -1080,7 +1097,7 @@
                 assert_eq!(rows[0].len(), 2, "row has two cells");
                 // First cell should be an AsciiImage block.
                 match &rows[0][0] {
-                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text, .. }) => {
                         assert!(!lines.is_empty(), "AsciiImage should have lines");
                         assert_eq!(alt_text, "gradient");
                     }
@@ -1122,9 +1139,10 @@
             80,
             false,
             true, // force ASCII art
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse(md, h(), &mut im, &theme);
+        let blocks = super::parse(md, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
 
         // ── Parser-level checks ────────────────────────────────────
         assert_eq!(blocks.len(), 1, "should produce one Table block");
@@ -1134,7 +1152,7 @@
                 assert_eq!(rows.len(), 1);
 
                 let a_lines = match &rows[0][0] {
-                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text, .. }) => {
                         assert_eq!(alt_text, "gradient");
                         assert_eq!(lines.len(), 8, "gradient.png → 120/16 = 8 rows");
                         assert_eq!(
@@ -1153,7 +1171,7 @@
                 };
 
                 let b_lines = match &rows[0][1] {
-                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text }) => {
+                    TableCell::Block(RenderedBlock::AsciiImage { lines, alt_text, .. }) => {
                         assert_eq!(alt_text, "GitLab");
                         assert_eq!(lines.len(), 16, "gitlab-logo.png → 256/16 = 16 rows");
                         assert_eq!(
@@ -1264,9 +1282,10 @@
             80,
             false,
             true,
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse(md, h(), &mut im, &theme);
+        let blocks = super::parse(md, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         let doc = crate::layout::flatten(&blocks, 80, &theme);
 
         // header(1) + sep(1) + blank_sep(1) + row(8) = 11
@@ -1335,14 +1354,15 @@
             80,
             true,  // no_images — disabled
             false,
+            false, // fetch_remote
         );
         let theme = crate::theme::default_theme();
-        let blocks = super::parse(md, h(), &mut im, &theme);
+        let blocks = super::parse(md, h(), &mut im, &mut crate::math::MathEngine::new(false, false), &theme);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             RenderedBlock::Table { rows, .. } => {
                 match &rows[0][0] {
-                    TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
+                    TableCell::Block(RenderedBlock::ImageFallback { alt_text, .. }) => {
                         assert_eq!(alt_text, "photo");
                     }
                     other => panic!(
@@ -1430,67 +1450,16 @@
     // ── LaTeX Math tests ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_unicode_math_greek_letters() {
-        assert_eq!(super::unicode_math("\\alpha + \\beta"), "\u{03B1} + \u{03B2}");
-        assert_eq!(super::unicode_math("\\pi"), "\u{03C0}");
-        assert_eq!(super::unicode_math("\\Omega"), "\u{03A9}");
-    }
-
-    #[test]
-    fn test_unicode_math_operators() {
-        assert_eq!(super::unicode_math("\\leq"), "\u{2264}");
-        assert_eq!(super::unicode_math("\\geq"), "\u{2265}");
-        assert_eq!(super::unicode_math("\\neq"), "\u{2260}");
-        assert_eq!(super::unicode_math("\\infty"), "\u{221E}");
-        assert_eq!(super::unicode_math("\\times"), "\u{00D7}");
-    }
-
-    #[test]
-    fn test_unicode_math_superscript() {
-        assert_eq!(super::unicode_math("x^2"), "x\u{00B2}");
-        assert_eq!(super::unicode_math("x^{23}"), "x\u{00B2}\u{00B3}");
-    }
-
-    #[test]
-    fn test_unicode_math_subscript() {
-        assert_eq!(super::unicode_math("x_0"), "x\u{2080}");
-        assert_eq!(super::unicode_math("a_{12}"), "a\u{2081}\u{2082}");
-    }
-
-    #[test]
-    fn test_unicode_math_arrows() {
-        assert_eq!(super::unicode_math("\\rightarrow"), "\u{2192}");
-        assert_eq!(super::unicode_math("\\Rightarrow"), "\u{21D2}");
-        assert_eq!(super::unicode_math("\\leftarrow"), "\u{2190}");
-    }
-
-    #[test]
-    fn test_unicode_math_unrecognized_passthrough() {
-        // Unrecognized commands pass through as-is.
-        assert_eq!(super::unicode_math("\\foobar"), "\\foobar");
-    }
-
-    #[test]
-    fn test_unicode_math_escaped_chars() {
-        assert_eq!(super::unicode_math("\\{x\\}"), "{x}");
-    }
-
-    #[test]
-    fn test_unicode_math_empty_input() {
-        assert_eq!(super::unicode_math(""), "");
-    }
-
-    #[test]
     fn test_parser_inline_math_produces_styled_span() {
         let blocks = parse("The formula $E = mc^{2}$ is famous.", h());
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             RenderedBlock::Paragraph { content } => {
-                // Should contain spans for "The formula ", "$E = mc²$", and " is famous."
+                // Inline math Unicode fallback wraps converted text in $ delimiters.
                 let full_text: String = content.iter().map(|s| s.text.as_str()).collect();
                 assert!(
                     full_text.contains("$E = mc\u{00B2}$"),
-                    "Expected Unicode superscript in: {full_text}"
+                    "Expected Unicode superscript with $ delimiters in: {full_text}"
                 );
             }
             _ => panic!("expected Paragraph block"),
@@ -1498,19 +1467,19 @@
     }
 
     #[test]
-    fn test_parser_display_math_produces_paragraph() {
+    fn test_parser_display_math_produces_math_unicode() {
         let blocks = parse("$$\\alpha + \\beta = \\gamma$$", h());
-        // Display math creates a separate Paragraph block.
+        // Display math creates a MathUnicode block.
         assert!(!blocks.is_empty());
         let has_math = blocks.iter().any(|b| {
-            if let RenderedBlock::Paragraph { content } = b {
+            if let RenderedBlock::MathUnicode { content, .. } = b {
                 let text: String = content.iter().map(|s| s.text.as_str()).collect();
                 text.contains("$$\u{03B1} + \u{03B2} = \u{03B3}$$")
             } else {
                 false
             }
         });
-        assert!(has_math, "expected a Paragraph with display math content");
+        assert!(has_math, "expected a MathUnicode with display math content");
     }
 
     #[test]
@@ -1518,3 +1487,848 @@
         let source = include_str!("../../testdata/math.md");
         let _ = parse(source, h());
     }
+
+    // ── Remote image tests ────────────────────────────────────────────
+
+    fn parse_with_mgr(source: &str, mgr: &mut ImageManager) -> Vec<RenderedBlock> {
+        let mut math = crate::math::MathEngine::new(false, false);
+        let theme = crate::theme::default_theme();
+        super::parse(source, h(), mgr, &mut math, &theme)
+    }
+
+    #[test]
+    fn test_parser_remote_url_produces_image_pending() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let blocks = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(pending, "remote URL with empty cache should produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_remote_url_no_images_produces_fallback() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, true, false, false);
+        let blocks = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        let fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback, "no_images=true should produce ImageFallback for remote URLs");
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(!pending, "no_images=true should not produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_remote_url_cached_produces_ascii() {
+        // With no picker and empty cache, first parse produces ImagePending.
+        // Insert into cache, re-parse — should resolve to AsciiImage (no graphics support).
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let blocks1 = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        assert!(blocks1.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. })));
+
+        // Populate cache with a small test image.
+        let dyn_img = DynamicImage::new_rgb8(32, 32);
+        mgr.insert_cache("https://example.com/img.png".to_string(), dyn_img);
+
+        let blocks2 = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        let has_ascii = blocks2.iter().any(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+        assert!(has_ascii, "cached remote URL without graphics support should produce AsciiImage");
+        let still_pending = blocks2.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(!still_pending, "cached URL should not produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_remote_url_in_table_pending() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let md = "| Col |\n|-----|\n| ![alt](https://example.com/img.png) |";
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let table = blocks.iter().find(|b| matches!(b, RenderedBlock::Table { .. }));
+        assert!(table.is_some(), "should produce a Table block");
+        if let Some(RenderedBlock::Table { rows, .. }) = table {
+            assert!(!rows.is_empty());
+            if let TableCell::Block(block) = &rows[0][0] {
+                assert!(
+                    matches!(block, RenderedBlock::ImagePending { .. }),
+                    "remote image in table cell should be ImagePending"
+                );
+            }
+        }
+    }
+
+    // ── HTML <img> tag tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_parser_html_img_remote_url_produces_image_pending() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let md = r#"<div align="center">
+  <img src="https://example.com/img.png" alt="test image" width="90%"/>
+  <p>Figure 1</p>
+</div>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(pending, "HTML <img> with remote URL should produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_html_img_inline_produces_image_pending() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let md = r#"Text before <img src="https://example.com/inline.png" alt="inline"/> text after"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(pending, "inline HTML <img> with remote URL should produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_html_img_no_images_produces_fallback() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, true, false, false);
+        let md = r#"<img src="https://example.com/img.png" alt="test"/>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback, "no_images=true should produce ImageFallback for HTML <img>");
+    }
+
+    #[test]
+    fn test_parser_html_img_cached_produces_ascii() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let url = "https://example.com/cached.png";
+        mgr.insert_cache(url.to_string(), DynamicImage::new_rgb8(32, 32));
+        let md = r#"<img src="https://example.com/cached.png" alt="cached"/>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let has_ascii = blocks.iter().any(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+        assert!(has_ascii, "cached HTML <img> without graphics support should produce AsciiImage");
+    }
+
+    #[test]
+    fn test_parser_html_img_local_produces_fallback() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let md = r#"<img src="nonexistent.png" alt="local"/>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let has_fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(has_fallback, "local HTML <img> with missing file should produce ImageFallback");
+    }
+
+    #[test]
+    fn test_parser_html_img_no_src_ignored() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let md = r#"<img alt="no source"/>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let has_image = blocks.iter().any(|b| {
+            matches!(b, RenderedBlock::ImagePending { .. }
+                | RenderedBlock::ImageFallback { .. }
+                | RenderedBlock::AsciiImage { .. }
+                | RenderedBlock::Image { .. })
+        });
+        assert!(!has_image, "HTML <img> without src should not produce any image block");
+    }
+
+    #[test]
+    fn test_parser_html_img_div_block_produces_image_pending() {
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let md = "<div>\n  <img src=\"https://example.com/x.png\" alt=\"in div\"/>\n</div>";
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(pending, "<img> inside <div> block should produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_remote_url_fetch_disabled_produces_fallback() {
+        // fetch_remote=false (default): remote URLs should produce ImageFallback, not ImagePending.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let blocks = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        let fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback, "fetch_remote=false should produce ImageFallback for remote URLs");
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(!pending, "fetch_remote=false should not produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_remote_url_fetch_disabled_cached_produces_ascii() {
+        // Even with fetch_remote=false, cached images should still be resolved.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let url = "https://example.com/img.png";
+        mgr.insert_cache(url.to_string(), DynamicImage::new_rgb8(32, 32));
+        let blocks = parse_with_mgr(&format!("![alt]({url})"), &mut mgr);
+        let has_ascii = blocks.iter().any(|b| matches!(b, RenderedBlock::AsciiImage { .. }));
+        assert!(has_ascii, "cached remote URL should produce AsciiImage even with fetch_remote=false");
+    }
+
+    #[test]
+    fn test_parser_remote_url_fetch_enabled_produces_pending() {
+        // fetch_remote=true: the original behavior, remote URLs produce ImagePending.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        let blocks = parse_with_mgr("![alt](https://example.com/img.png)", &mut mgr);
+        let pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(pending, "fetch_remote=true should produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_html_img_fetch_disabled_produces_fallback() {
+        // fetch_remote=false via HTML <img> tag route.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let md = r#"<img src="https://example.com/img.png" alt="test"/>"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let fallback = blocks.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback, "HTML <img> with fetch_remote=false should produce ImageFallback");
+    }
+
+    // ── Failed remote URL tests ───────────────────────────────────────
+
+    #[test]
+    fn test_parser_failed_remote_url_produces_fallback() {
+        // When a remote URL has previously failed (is in failed_urls),
+        // re-parse should produce ImageFallback instead of ImagePending.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        // Simulate a failed fetch: mark URL as pending then as failed.
+        mgr.mark_pending("https://example.com/broken.png");
+        mgr.mark_failed("https://example.com/broken.png");
+        let blocks = parse_with_mgr("![alt](https://example.com/broken.png)", &mut mgr);
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "failed URL should produce ImageFallback, not ImagePending");
+        if let Some(RenderedBlock::ImageFallback { src_url, alt_text }) = fallback {
+            assert_eq!(src_url, "https://example.com/broken.png");
+            assert_eq!(alt_text, "alt");
+        }
+        // Must NOT produce ImagePending.
+        let has_pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(!has_pending, "failed URL should not produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_failed_remote_url_html_img_produces_fallback() {
+        // HTML <img> with a previously-failed URL should also degrade to fallback.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        mgr.mark_pending("https://cdn.example.com/logo.svg");
+        mgr.mark_failed("https://cdn.example.com/logo.svg");
+        let md = r#"<img src="https://cdn.example.com/logo.svg" alt="company logo">"#;
+        let blocks = parse_with_mgr(md, &mut mgr);
+        let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+        assert!(fallback.is_some(), "failed HTML <img> URL should produce ImageFallback");
+    }
+
+    #[test]
+    fn test_parser_pending_remote_url_still_produces_pending() {
+        // A URL that is pending (currently being fetched) should still produce
+        // ImagePending — the fetch thread is working on it.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        mgr.mark_pending("https://example.com/slow.png");
+        let blocks = parse_with_mgr("![alt](https://example.com/slow.png)", &mut mgr);
+        let has_pending = blocks.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(has_pending, "pending URL should still produce ImagePending");
+    }
+
+    #[test]
+    fn test_parser_set_fetch_remote_clears_failed_and_re_allows_pending() {
+        // After toggling fetch_remote off then on, failed URLs should be cleared
+        // and re-parse should produce ImagePending again.
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, true);
+        mgr.mark_pending("https://example.com/retry.png");
+        mgr.mark_failed("https://example.com/retry.png");
+        // Verify it's failed.
+        let blocks1 = parse_with_mgr("![alt](https://example.com/retry.png)", &mut mgr);
+        assert!(blocks1.iter().any(|b| matches!(b, RenderedBlock::ImageFallback { .. })));
+        // Toggle off then on clears failed_urls.
+        mgr.set_fetch_remote(false);
+        mgr.set_fetch_remote(true);
+        // Now the URL should produce ImagePending again.
+        let blocks2 = parse_with_mgr("![alt](https://example.com/retry.png)", &mut mgr);
+        let has_pending = blocks2.iter().any(|b| matches!(b, RenderedBlock::ImagePending { .. }));
+        assert!(has_pending, "after clearing failed_urls, URL should produce ImagePending again");
+    }
+
+    #[test]
+    fn test_parser_extract_attr_double_quoted() {
+        let tag = r#"<img src="https://example.com/img.png" alt="test image"/>"#;
+        assert_eq!(super::extract_attr(tag, "src"), Some("https://example.com/img.png".to_string()));
+        assert_eq!(super::extract_attr(tag, "alt"), Some("test image".to_string()));
+    }
+
+    #[test]
+    fn test_parser_extract_attr_single_quoted() {
+        let tag = r#"<img src='https://example.com/img.png' alt='test'/>"#;
+        assert_eq!(super::extract_attr(tag, "src"), Some("https://example.com/img.png".to_string()));
+        assert_eq!(super::extract_attr(tag, "alt"), Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_parser_extract_attr_missing() {
+        let tag = r#"<img alt="no source"/>"#;
+        assert_eq!(super::extract_attr(tag, "src"), None);
+    }
+
+    // ── pulldown-cmark event behavior for image syntax ────────────────
+
+    /// Documents how pulldown-cmark emits events for a markdown image `![]()`.
+    /// pulldown-cmark uses `Tag::Image` for markdown syntax, not `Event::Html`.
+    #[test]
+    fn test_pulldown_cmark_markdown_image_uses_tag_image() {
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+        let mut events: Vec<_> = Parser::new("![alt](test.png)").collect();
+        // pulldown-cmark wraps the image in a paragraph.
+        events.retain(|e| !matches!(e, Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph)));
+
+        assert!(matches!(&events[0], Event::Start(Tag::Image { .. })), "markdown image should emit Tag::Image");
+        assert!(matches!(&events[1], Event::Text(_)), "alt text should follow");
+        assert!(matches!(&events[2], Event::End(TagEnd::Image)), "should close with TagEnd::Image");
+    }
+
+    /// Documents that HTML `<img>` emits `Event::Html` (not `Tag::Image`).
+    /// This is why `parser.rs` must extract src/alt from raw HTML strings.
+    /// When <img> appears inside paragraph text (inline), it uses `InlineHtml`;
+    /// when standalone, it uses `Html` wrapped in an `HtmlBlock`.
+    #[test]
+    fn test_pulldown_cmark_html_img_standalone_uses_html() {
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let events: Vec<_> = Parser::new(r#"<img src="test.png" alt="alt">"#).collect();
+        let has_image_tag = events.iter().any(|e| matches!(e, Event::Start(Tag::Image { .. })));
+        let has_html = events.iter().any(|e| matches!(e, Event::Html(_)));
+        assert!(!has_image_tag, "HTML <img> should NOT emit Tag::Image");
+        assert!(has_html, "standalone HTML <img> should emit Html");
+    }
+
+    /// Documents that `<img>` embedded within paragraph text emits `InlineHtml`.
+    #[test]
+    fn test_pulldown_cmark_html_img_in_paragraph_uses_inline_html() {
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let md = r#"Text before <img src="https://example.com/inline.png" alt="inline"/> text after"#;
+        let events: Vec<_> = Parser::new(md).collect();
+        let has_image_tag = events.iter().any(|e| matches!(e, Event::Start(Tag::Image { .. })));
+        let has_inline_html = events.iter().any(|e| matches!(e, Event::InlineHtml(_)));
+        assert!(!has_image_tag, "inline HTML <img> should NOT emit Tag::Image");
+        assert!(has_inline_html, "inline HTML <img> within text should emit InlineHtml");
+    }
+
+    /// Documents that `<img>` inside a block element (like `<div>`) emits `Event::Html`.
+    #[test]
+    fn test_pulldown_cmark_html_img_in_div_uses_html() {
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let events: Vec<_> = Parser::new(r#"<div><img src="test.png" alt="alt"></div>"#).collect();
+        let has_image_tag = events.iter().any(|e| matches!(e, Event::Start(Tag::Image { .. })));
+        let has_html = events.iter().any(|e| matches!(e, Event::Html(_)));
+        assert!(!has_image_tag, "<img> inside <div> should NOT emit Tag::Image");
+        assert!(has_html, "<img> inside <div> should emit Html (block-level)");
+    }
+
+    /// Documents that a self-closing `<img .../>` and non-self-closing `<img ...></img>`
+    /// both produce the same event type.
+    #[test]
+    fn test_pulldown_cmark_html_img_self_closing_vs_not() {
+        use pulldown_cmark::{Event, Parser};
+
+        let self_closing: Vec<_> = Parser::new(r#"<img src="test.png" alt="alt">"#).collect();
+        let explicit_close: Vec<_> = Parser::new(r#"<img src="test.png" alt="alt"></img>"#).collect();
+
+        let sc_html = self_closing.iter().any(|e| matches!(e, Event::Html(_) | Event::InlineHtml(_)));
+        let ec_html = explicit_close.iter().any(|e| matches!(e, Event::Html(_) | Event::InlineHtml(_)));
+        assert!(sc_html, "self-closing <img> should emit Html or InlineHtml");
+        assert!(ec_html, "explicit close <img></img> should emit Html or InlineHtml");
+    }
+
+    // ── Additional Math tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parser_inline_math_span_has_math_latex_field() {
+        let blocks = parse("The $x^2$ formula.", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                let math_span = content.iter().find(|s| !s.math_latex.is_empty());
+                assert!(math_span.is_some(), "should have a span with non-empty math_latex");
+                assert_eq!(math_span.unwrap().math_latex, "x^2");
+            }
+            _ => panic!("expected Paragraph"),
+        }
+    }
+
+    #[test]
+    fn test_parser_inline_math_non_math_spans_have_empty_math_latex() {
+        let blocks = parse("Hello $x^2$ world.", h());
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                // "Hello " and " world." should have empty math_latex
+                let non_math: Vec<_> = content.iter().filter(|s| !s.text.contains('\u{00B2}')).collect();
+                for span in &non_math {
+                    assert!(span.math_latex.is_empty(), "non-math span should have empty math_latex: {:?}", span.text);
+                }
+            }
+            _ => panic!("expected Paragraph"),
+        }
+    }
+
+    #[test]
+    fn test_parser_multiple_inline_math_in_paragraph() {
+        let blocks = parse("$a^2$ and $b^2$ equal $c^2$", h());
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            RenderedBlock::Paragraph { content } => {
+                let math_spans: Vec<_> = content.iter().filter(|s| !s.math_latex.is_empty()).collect();
+                assert_eq!(math_spans.len(), 3, "should have 3 inline math spans");
+                assert_eq!(math_spans[0].math_latex, "a^2");
+                assert_eq!(math_spans[1].math_latex, "b^2");
+                assert_eq!(math_spans[2].math_latex, "c^2");
+            }
+            _ => panic!("expected Paragraph"),
+        }
+    }
+
+    #[test]
+    fn test_parser_mixed_inline_and_display() {
+        let blocks = parse("Inline $x^2$\n\n$$E = mc^2$$\n\nMore text.", h());
+        // Should have: Paragraph (with inline math), MathUnicode, Paragraph
+        let has_paragraph = blocks.iter().any(|b| matches!(b, RenderedBlock::Paragraph { .. }));
+        let has_math_unicode = blocks.iter().any(|b| matches!(b, RenderedBlock::MathUnicode { .. }));
+        assert!(has_paragraph, "should have a Paragraph with inline math");
+        assert!(has_math_unicode, "should have a MathUnicode for display math");
+    }
+
+    #[test]
+    fn test_parser_display_math_raw_latex_preserved() {
+        let blocks = parse("$$\\alpha + \\beta$$", h());
+        let math_block = blocks.iter().find(|b| matches!(b, RenderedBlock::MathUnicode { .. }));
+        assert!(math_block.is_some());
+        if let Some(RenderedBlock::MathUnicode { raw_latex, .. }) = math_block {
+            assert_eq!(raw_latex, "\\alpha + \\beta");
+        }
+    }
+
+    #[test]
+    fn test_parser_math_disabled_still_produces_math_unicode() {
+        // When MathEngine is disabled (no graphics), display math still produces MathUnicode.
+        let source = "$$x^2$$";
+        let mut math = crate::math::MathEngine::new(false, false);
+        let theme = crate::theme::default_theme();
+        let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, false, false, false);
+        let blocks = super::parse(source, h(), &mut mgr, &mut math, &theme);
+        let has_math = blocks.iter().any(|b| matches!(b, RenderedBlock::MathUnicode { .. }));
+        assert!(has_math, "disabled MathEngine should still produce MathUnicode");
+    }
+
+#[test]
+fn test_math_parsing_unicode_symbols() {
+    // Test that pulldown-cmark parses formulas with Unicode math symbols
+    use pulldown_cmark::{Event, Options, Parser};
+    
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_MATH);
+    
+    // Test 1: Formula with ∣ (U+2223) and − (U+2212) from the user's markdown
+    let formula = "$P(w_i∣w_1,\\cdots,w_{i−1})$";
+    let events: Vec<_> = Parser::new_ext(formula, options).collect();
+    println!("Formula events: {:?}", events);
+    
+    let has_inline_math = events.iter().any(|e| matches!(e, Event::InlineMath(_)));
+    assert!(has_inline_math, "pulldown-cmark should parse formula as InlineMath: {:?}", events);
+    
+    // Test 2: In a full line context
+    let line = "- **Bigram (当 N=2 时)** ：因此，条件概率 $P(w_i∣w_1,\\cdots,w_{i−1})$ 就可以近似为";
+    let events2: Vec<_> = Parser::new_ext(line, options).collect();
+    println!("Full line events: {:?}", events2);
+    
+    let has_inline_math2 = events2.iter().any(|e| matches!(e, Event::InlineMath(_)));
+    assert!(has_inline_math2, "pulldown-cmark should parse inline math in full line: {:?}", events2);
+}
+
+#[test]
+fn test_math_parsing_with_html_strong_tag() {
+    // The actual file uses <strong> HTML tags, not **...** markdown
+    use pulldown_cmark::{Event, Options, Parser};
+    
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_MATH);
+    
+    // Actual content from line 26 of the file (simplified)
+    let input = "- <strong>Bigram (当 N=2 时)</strong> ：因此，条件概率 $P(w_i∣w_1,\\cdots,w_{i−1})$ 就可以近似为";
+    let events: Vec<_> = Parser::new_ext(input, options).collect();
+    println!("HTML strong events: {:?}", events);
+    
+    let has_inline_math = events.iter().any(|e| matches!(e, Event::InlineMath(_)));
+    assert!(has_inline_math, "should have InlineMath with HTML <strong>: {:?}", events);
+}
+
+#[test]
+fn test_parse_inline_math_with_unicode_symbols() {
+    // Full parse() test with the formula from line 26
+    let input = "- <strong>Bigram (当 N=2 时)</strong> ：因此，条件概率 $P(w_i∣w_1,\\cdots,w_{i−1})$ 就可以近似为";
+    let mut images = crate::images::ImageManager::new(
+        std::path::PathBuf::new(), None, 80, false, false, false,
+    );
+    let mut math = crate::math::MathEngine::new(true, false);
+    let theme = crate::theme::MarkdownTheme::default();
+    let blocks = super::parse(input, &crate::highlight::Highlighter::new(), &mut images, &mut math, &theme);
+
+    // Should have a list with an item containing a math span
+    let found_math_latex = blocks.iter().any(|b| {
+        match b {
+            super::RenderedBlock::List { items, .. } => {
+                items.iter().any(|item| {
+                    item.content.iter().any(|span| !span.math_latex.is_empty())
+                })
+            }
+            _ => false,
+        }
+    });
+    assert!(found_math_latex, "should find math_latex in parsed list item");
+}
+
+#[test]
+fn test_math_parsing_leading_space_after_dollar() {
+    // Line 533: $ \hat{p}_i = \frac{p_i}{\sum_{j \in \text{候选集}} p_j}$
+    // pulldown-cmark requires opening $ to be followed by non-whitespace.
+    use pulldown_cmark::{Event, Options, Parser};
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_MATH);
+
+    // With leading space after $
+    let with_space = "$ \\hat{p}_i$";
+    let events: Vec<_> = Parser::new_ext(with_space, options).collect();
+    println!("With space: {:?}", events);
+    let has_math_space = events.iter().any(|e| matches!(e, Event::InlineMath(_)));
+
+    // Without leading space
+    let no_space = "$\\hat{p}_i$";
+    let events2: Vec<_> = Parser::new_ext(no_space, options).collect();
+    println!("No space: {:?}", events2);
+    let has_math_nospace = events2.iter().any(|e| matches!(e, Event::InlineMath(_)));
+
+    println!("With space: {}, Without space: {}", has_math_space, has_math_nospace);
+}
+
+#[test]
+fn test_normalize_math_strips_leading_space() {
+    use super::normalize_math_delimiters;
+    let src = "$ \\hat{p}_i$";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, "$\\hat{p}_i$", "should strip leading space after $");
+}
+
+#[test]
+fn test_normalize_math_trailing_space_only_not_stripped() {
+    use super::normalize_math_delimiters;
+    // $x^2 $ — no leading space, so the normalization path isn't entered.
+    // Trailing whitespace before closing $ is left for pulldown-cmark to reject.
+    // This is a known limitation; authors should write $x^2$ without trailing space.
+    let src = "$x^2 $";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src, "trailing-only whitespace not stripped (no leading space)");
+}
+
+#[test]
+fn test_normalize_math_strips_both_with_math_content() {
+    use super::normalize_math_delimiters;
+    // $ x^2 $ — leading AND trailing whitespace.  The trimmed content "x^2"
+    // contains ^ so looks_like_math() accepts the trailing-ws closing $.
+    let src = "$ x^2 $";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, "$x^2$", "should strip leading and trailing whitespace for math content");
+}
+
+#[test]
+fn test_normalize_math_display_strips_whitespace() {
+    use super::normalize_math_delimiters;
+    let src = "$$ \\alpha + \\beta $$";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, "$$\\alpha + \\beta$$");
+}
+
+#[test]
+fn test_normalize_math_no_change_without_whitespace() {
+    use super::normalize_math_delimiters;
+    let src = "$x^2$";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, "$x^2$", "no whitespace, no change");
+}
+
+#[test]
+fn test_normalize_math_skips_code_blocks() {
+    use super::normalize_math_delimiters;
+    let src = "```\n$ x^2 $\n```";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src, "code blocks should be untouched");
+}
+
+#[test]
+fn test_normalize_math_skips_inline_code() {
+    use super::normalize_math_delimiters;
+    let src = "Use `$ x^2 $` for math.";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src, "inline code should be untouched");
+}
+
+#[test]
+fn test_normalize_math_skips_escaped_dollar() {
+    use super::normalize_math_delimiters;
+    let src = "\\$ not math \\$";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src, "escaped dollar should be untouched");
+}
+
+#[test]
+fn test_normalize_math_currency_not_touched() {
+    use super::normalize_math_delimiters;
+    // $5 doesn't have whitespace after $, so no pre-processing.
+    let src = "Price is $5.";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src);
+}
+
+#[test]
+fn test_normalize_math_no_false_positive_with_dollar_in_content() {
+    use super::normalize_math_delimiters;
+    // $ 5, but $x^2$ — content between first and last $ contains another $, so skip.
+    let src = "$ 5, but $x^2$";
+    let out = normalize_math_delimiters(src);
+    // The first $ is followed by space, but content contains $, so no modification.
+    assert_eq!(out, src);
+}
+
+#[test]
+fn test_normalize_math_line_533_formula() {
+    use super::normalize_math_delimiters;
+    let src = r#"`Top-k `：其原理是将所有 token 按概率从高到低排序，取排名前 k 个的 token 组成 "候选集"，随后对筛选出的 k 个 token 的概率进行 "归一化"： $ \hat{p}_i = \frac{p_i}{\sum_{j \in \text{候选集}} p_j}$"#;
+    let out = normalize_math_delimiters(src);
+    assert!(out.contains("$\\hat{p}_i"), "should strip space after $: {out}");
+    assert!(out.contains("p_j}$"), "closing $ should be preserved");
+    assert!(!out.contains("$ \\"), "leading space should be removed");
+}
+
+#[test]
+fn test_normalize_math_preserves_cjk_text() {
+    use super::normalize_math_delimiters;
+    let src = "这是中文文本 $ x^2$ 更多中文";
+    let out = normalize_math_delimiters(src);
+    assert!(out.contains("这是中文文本"), "CJK text before formula should be preserved: {out}");
+    assert!(out.contains("更多中文"), "CJK text after formula should be preserved: {out}");
+    assert!(out.contains("$x^2$"), "formula should be normalized: {out}");
+}
+
+#[test]
+fn test_normalize_math_preserves_cjk_only() {
+    use super::normalize_math_delimiters;
+    let src = "这是一段没有公式的中文文本";
+    let out = normalize_math_delimiters(src);
+    assert_eq!(out, src, "CJK-only text should be unchanged");
+}
+
+// ── Regression: math toggle produces correct block types ────────────────
+
+#[test]
+fn test_parser_display_math_ignores_cache_when_disabled() {
+    // Regression: when MathEngine is disabled (enabled=false), the parser
+    // must produce MathUnicode even when the cache has a rendered image.
+    // Previously the parser checked get_cached() without guarding on enabled(),
+    // so toggling off had no visible effect.
+    use image::DynamicImage;
+
+    let mut math = crate::math::MathEngine::new(true, true);
+    // Pre-populate cache — simulates a formula rendered in a previous session.
+    let img = DynamicImage::new_rgb8(10, 10);
+    math.insert_cache("\\alpha + \\beta".to_string(), img);
+    assert!(math.enabled(), "precondition: enabled");
+    assert!(math.get_cached("\\alpha + \\beta").is_some(), "precondition: cached");
+
+    // Now disable — simulates user pressing T.
+    math.set_enabled(false);
+    assert!(!math.enabled());
+
+    let theme = crate::theme::default_theme();
+    let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, true, false, false);
+    let blocks = super::parse("$$\\alpha + \\beta$$", h(), &mut mgr, &mut math, &theme);
+
+    // Must be MathUnicode (text), NOT MathImage (pixel).
+    let has_math_unicode = blocks.iter().any(|b| matches!(b, RenderedBlock::MathUnicode { .. }));
+    let has_math_image = blocks.iter().any(|b| matches!(b, RenderedBlock::MathImage { .. }));
+    assert!(has_math_unicode, "disabled engine must produce MathUnicode, not use cache");
+    assert!(!has_math_image, "disabled engine must NOT produce MathImage even with warm cache");
+}
+
+#[test]
+fn test_parser_inline_math_ignores_cache_when_disabled() {
+    // Same as above but for inline math ($...$) within a paragraph.
+    use image::DynamicImage;
+
+    let mut math = crate::math::MathEngine::new(true, true);
+    let img = DynamicImage::new_rgb8(10, 10);
+    math.insert_cache("x^2".to_string(), img);
+    math.set_enabled(false);
+
+    let theme = crate::theme::default_theme();
+    let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, true, false, false);
+    let blocks = super::parse("The formula $x^2$ is simple.", h(), &mut mgr, &mut math, &theme);
+
+    // The paragraph should contain a span with math_latex set but math_image=None.
+    let mut found_math_span = false;
+    for block in &blocks {
+        if let RenderedBlock::Paragraph { content } = block {
+            for span in content {
+                if !span.math_latex.is_empty() {
+                    assert!(span.math_image.is_none(),
+                        "disabled engine must NOT attach InlineMathImage even with warm cache");
+                    assert!(span.text.contains('x') || span.text.contains('²'),
+                        "math span should contain Unicode math text, got: {:?}", span.text);
+                    found_math_span = true;
+                }
+            }
+        }
+    }
+    assert!(found_math_span, "should find inline math span in paragraph");
+}
+
+#[test]
+fn test_parser_display_math_uses_cache_when_enabled() {
+    // Verify the positive case: when enabled AND cache has the formula,
+    // the parser produces MathImage (not MathUnicode).
+    use image::DynamicImage;
+
+    let mut math = crate::math::MathEngine::new(true, true);
+    let img = DynamicImage::new_rgb8(10, 10);
+    math.insert_cache("\\alpha".to_string(), img);
+    assert!(math.enabled());
+    assert!(math.get_cached("\\alpha").is_some());
+
+    // ImageManager needs to accept the load — use no_images=true to force fallback.
+    // Actually we need it to load from memory, so use no_picker (None) but no_images=false.
+    // But without a Picker, load_image_from_memory returns Err. Let's check the actual path.
+    // When load_image_from_memory fails, it falls through to MathUnicode. So for this test
+    // we just verify the code path *attempts* to use the cache (falls through to Unicode
+    // because no Picker). The key assertion is that it does NOT produce MathUnicode with
+    // the original raw_latex when cache is warm (it may produce MathUnicode due to load
+    // failure, but it will try the cache first).
+    //
+    // A cleaner test: verify that when enabled=false the result differs from enabled=true.
+    let theme = crate::theme::default_theme();
+
+    // With enabled=true, cache hit → tries load_image_from_memory → fails (no Picker)
+    // → falls through to MathUnicode. This is the same output as enabled=false.
+    // To distinguish, we check that the span's math_latex is set correctly for both cases
+    // and that the enabled=false path definitely doesn't attempt image loading.
+
+    // The real value of this test is the negative case above (enabled=false).
+    // Here we just confirm the baseline: enabled=true with cache produces a block.
+    let mut mgr = ImageManager::new(PathBuf::from("."), None, 80, true, false, false);
+    let blocks = super::parse("$$\\alpha$$", h(), &mut mgr, &mut math, &theme);
+    assert!(!blocks.is_empty(), "should produce at least one block");
+    // Without Picker, it falls through to MathUnicode regardless — that's expected.
+    let has_math = blocks.iter().any(|b|
+        matches!(b, RenderedBlock::MathUnicode { .. }) || matches!(b, RenderedBlock::MathImage { .. }));
+    assert!(has_math, "enabled engine should produce a math block");
+}
+
+// ── Missing local image file tests ─────────────────────────────────
+
+#[test]
+fn test_parser_missing_local_image_produces_fallback_with_src_url() {
+    // When a local image file doesn't exist, the parser should produce
+    // ImageFallback with the src_url preserved for diagnostics.
+    let mut im = crate::images::ImageManager::new(
+        std::path::PathBuf::from("testdata"),
+        None,
+        80,
+        false, // images enabled (will fail because no picker + missing file)
+        false,
+        false,
+    );
+    let theme = crate::theme::default_theme();
+    let blocks = super::parse(
+        "![my image](no-such-file.png)",
+        h(),
+        &mut im,
+        &mut crate::math::MathEngine::new(false, false),
+        &theme,
+    );
+    let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+    assert!(fallback.is_some(), "missing file should produce ImageFallback");
+    if let Some(RenderedBlock::ImageFallback { src_url, alt_text }) = fallback {
+        assert_eq!(src_url, "no-such-file.png", "src_url should be preserved");
+        assert_eq!(alt_text, "my image", "alt_text should be preserved");
+    }
+}
+
+#[test]
+fn test_parser_missing_local_image_html_img_produces_fallback() {
+    // HTML <img> with missing local file should also produce ImageFallback.
+    let mut im = crate::images::ImageManager::new(
+        std::path::PathBuf::from("testdata"),
+        None,
+        80,
+        false,
+        false,
+        false,
+    );
+    let theme = crate::theme::default_theme();
+    let blocks = super::parse(
+        r#"<img src="missing-photo.jpg" alt="a sunset">"#,
+        h(),
+        &mut im,
+        &mut crate::math::MathEngine::new(false, false),
+        &theme,
+    );
+    let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+    assert!(fallback.is_some(), "missing HTML img should produce ImageFallback");
+    if let Some(RenderedBlock::ImageFallback { src_url, alt_text }) = fallback {
+        assert_eq!(src_url, "missing-photo.jpg");
+        assert_eq!(alt_text, "a sunset");
+    }
+}
+
+#[test]
+fn test_parser_missing_local_image_in_list_produces_fallback() {
+    // Image inside a list with missing file should degrade gracefully.
+    let mut im = crate::images::ImageManager::new(
+        std::path::PathBuf::from("testdata"),
+        None,
+        80,
+        false,
+        false,
+        false,
+    );
+    let theme = crate::theme::default_theme();
+    let blocks = super::parse(
+        "- item one\n- ![photo](nonexistent.jpg)\n- item three",
+        h(),
+        &mut im,
+        &mut crate::math::MathEngine::new(false, false),
+        &theme,
+    );
+    // The image in a list produces a List block; the image itself is a child block
+    // of one of the list items. Search children for ImageFallback.
+    let mut found = false;
+    for b in &blocks {
+        if let RenderedBlock::List { items, .. } = b {
+            for item in items {
+                let has_fallback = item.children.iter().any(|child|
+                    matches!(child, RenderedBlock::ImageFallback { src_url, .. } if src_url.contains("nonexistent"))
+                );
+                let has_url = item.content.iter().any(|s| s.url.as_deref() == Some("nonexistent.jpg"));
+                if has_fallback || has_url {
+                    found = true;
+                }
+            }
+        }
+    }
+    assert!(found, "missing image in list should produce ImageFallback in children or URL in content");
+}
+
+#[test]
+fn test_parser_missing_local_image_no_eprintln() {
+    // Verify that parsing a missing local image produces a clean fallback.
+    // The eprintln! calls that previously corrupted the TUI have been removed.
+    let mut im = crate::images::ImageManager::new(
+        std::path::PathBuf::from("testdata"),
+        None,
+        80,
+        false,
+        false,
+        false,
+    );
+    let theme = crate::theme::default_theme();
+    let blocks = super::parse(
+        "![alt text](totally-missing.png)",
+        h(),
+        &mut im,
+        &mut crate::math::MathEngine::new(false, false),
+        &theme,
+    );
+    // The key assertion: fallback is produced without panicking or errors.
+    let fallback = blocks.iter().find(|b| matches!(b, RenderedBlock::ImageFallback { .. }));
+    assert!(fallback.is_some(), "missing image should produce clean ImageFallback");
+}

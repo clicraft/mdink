@@ -75,6 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
 
     // Draw visible document lines.
     let content_height = content_area.height as usize;
+    let mut image_renders = 0usize;
     if content_height > 0 {
         let range = app.visible_range();
         for (i, line_idx) in range.enumerate() {
@@ -96,15 +97,60 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
             // Collect search matches for this line (if any).
             let line_matches = collect_line_matches(app, line_idx);
 
+            // Check if this line is the selected link line (for link mode highlighting).
+            let is_link_highlight = app.link_mode
+                && app.document.links.get(app.link_selected).is_some_and(|l| l.line_index == line_idx);
+
+            // Check if this line is the selected image line (for image mode highlighting).
+            // For multi-line images (ImageStart + ImageContinuation), all rows are highlighted.
+            let is_image_highlight = app.image_mode
+                && app.document.images.get(app.image_selected).is_some_and(|img| {
+                    let start = img.line_index;
+                    if line_idx < start {
+                        return false;
+                    }
+                    // For ImageStart, count continuation lines to find the block extent.
+                    let doc = &app.document.lines;
+                    if start < doc.len() {
+                        if let DocumentLine::ImageStart { height, .. } = &doc[start] {
+                            return line_idx < start + *height as usize;
+                        }
+                    }
+                    // For non-ImageStart blocks (AsciiArt, Text fallback), highlight only the start line.
+                    line_idx == start
+                });
+
             match &app.document.lines[line_idx] {
                 DocumentLine::Text(line) => {
-                    let rendered = if line_matches.is_empty() {
+                    let rendered = if is_link_highlight || is_image_highlight {
+                        let focused_style = theme::search_focused_style(&app.theme.search);
+                        apply_link_highlight(line, focused_style, &line_matches, app)
+                    } else if line_matches.is_empty() {
                         line.clone()
                     } else {
                         apply_search_highlights(line, &line_matches, app)
                     };
                     let paragraph = Paragraph::new(rendered);
                     frame.render_widget(paragraph, line_area);
+
+                    // Overlay inline math images at their recorded column positions.
+                    for entry in &app.document.inline_images {
+                        if entry.line_index == line_idx {
+                            let img_rect = Rect {
+                                x: content_area.x + entry.col_offset,
+                                y,
+                                width: entry.width,
+                                height: 1,
+                            };
+                            // Bounds check: image must fit within the content area.
+                            if img_rect.x + img_rect.width <= content_area.x + content_area.width {
+                                let protocol = images.get_protocol(entry.protocol_index);
+                                let widget = StatefulImage::default();
+                                frame.render_stateful_widget(widget, img_rect, protocol);
+                                image_renders += 1;
+                            }
+                        }
+                    }
                 }
                 DocumentLine::Code(line) => {
                     let code_bg = theme::code_block_bg(&app.theme.code_block);
@@ -129,7 +175,10 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                             bg_style,
                         ));
                     }
-                    let code_line = if line_matches.is_empty() {
+                    let code_line = if is_link_highlight || is_image_highlight {
+                        let focused_style = theme::search_focused_style(&app.theme.search);
+                        apply_link_highlight(&Line::from(spans), focused_style, &line_matches, app)
+                    } else if line_matches.is_empty() {
                         Line::from(spans)
                     } else {
                         apply_search_highlights(&Line::from(spans), &line_matches, app)
@@ -148,7 +197,13 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                     frame.render_widget(paragraph, line_area);
                 }
                 DocumentLine::AsciiArt(line) => {
-                    let paragraph = Paragraph::new(line.clone());
+                    let rendered = if is_image_highlight {
+                        let focused_style = theme::search_focused_style(&app.theme.search);
+                        apply_link_highlight(line, focused_style, &line_matches, app)
+                    } else {
+                        line.clone()
+                    };
+                    let paragraph = Paragraph::new(rendered);
                     frame.render_widget(paragraph, line_area);
                 }
                 DocumentLine::ImageStart { protocol_index, height } => {
@@ -164,6 +219,7 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
                         let protocol = images.get_protocol(*protocol_index);
                         let widget = StatefulImage::default();
                         frame.render_stateful_widget(widget, img_area, protocol);
+                        image_renders += 1;
                     }
                 }
                 DocumentLine::ImageContinuation => {}
@@ -189,6 +245,10 @@ pub fn draw(frame: &mut Frame, app: &App, images: &mut ImageManager) {
 
     // Draw status bar at the bottom row.
     draw_status_bar(frame, app, area);
+
+    if image_renders > 0 {
+        log::debug!("rendered {image_renders} image protocols in frame");
+    }
 }
 
 // ── Outline panel (side, wide terminals) ─────────────────────────────────────
@@ -579,6 +639,50 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Goto-line mode: show :input_ prompt.
+    if let Some(input) = &app.goto_input {
+        let status_text = format!(" :{input}_ | Enter:jump Esc:cancel");
+        let padded = format!("{:<width$}", status_text, width = area.width as usize);
+        let status_line = Line::from(Span::styled(padded, status_style));
+        let paragraph = Paragraph::new(status_line);
+        frame.render_widget(paragraph, status_area);
+        return;
+    }
+
+    // Link mode: show link URL and navigation hints.
+    if app.link_mode {
+        if let Some(link) = app.document.links.get(app.link_selected) {
+            let status_text = format!(
+                " {} [{}/{}] | Tab:next Shift+Tab:prev Enter:follow Esc:close Back:back",
+                link.url,
+                app.link_selected + 1,
+                app.document.links.len(),
+            );
+            let padded = format!("{:<width$}", status_text, width = area.width as usize);
+            let status_line = Line::from(Span::styled(padded, status_style));
+            let paragraph = Paragraph::new(status_line);
+            frame.render_widget(paragraph, status_area);
+            return;
+        }
+    }
+
+    // Image mode: show image URL and navigation hints.
+    if app.image_mode {
+        if let Some(img) = app.document.images.get(app.image_selected) {
+            let status_text = format!(
+                " {} [{}/{}] | Tab:next Shift+Tab:prev Enter:open Esc:close",
+                img.url,
+                app.image_selected + 1,
+                app.document.images.len(),
+            );
+            let padded = format!("{:<width$}", status_text, width = area.width as usize);
+            let status_line = Line::from(Span::styled(padded, status_style));
+            let paragraph = Paragraph::new(status_line);
+            frame.render_widget(paragraph, status_area);
+            return;
+        }
+    }
+
     let percent = app.scroll_percent();
     let total_lines = app.document.total_height;
     let current_line = if total_lines == 0 {
@@ -610,8 +714,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "y:export-pdf o:open p:exit-preview"
     } else if app.print_preview {
         "y:export-pdf p:exit-preview"
+    } else if !app.nav_history.is_empty() {
+        "/:search o:outline f:files l:links Back:back"
     } else {
-        "/:search o:outline f:files"
+        "/:search o:outline f:files l:links"
     };
 
     let theme_name = if app.print_preview {
@@ -715,6 +821,72 @@ fn apply_search_highlights(
         }
     }
     // Emit final run.
+    let text = &plain[run_start..];
+    if !text.is_empty() {
+        result_spans.push(Span::styled(text.to_string(), run_style));
+    }
+
+    Line::from(result_spans)
+}
+
+/// Applies link highlight (focused style) to an entire line, plus search highlights.
+///
+/// When link mode is active and the current line contains the selected link,
+/// the focused search style is applied to all text on the line. Search matches
+/// are then layered on top.
+fn apply_link_highlight(
+    line: &Line<'static>,
+    link_style: Style,
+    search_matches: &[(&SearchMatch, bool)],
+    app: &App,
+) -> Line<'static> {
+    let match_style = theme::search_match_style(&app.theme.search);
+    let focused_style = theme::search_focused_style(&app.theme.search);
+
+    // Build plain text and byte-to-style map.
+    let mut plain = String::new();
+    let mut byte_styles: Vec<Style> = Vec::new();
+    for span in &line.spans {
+        let text: &str = span.content.as_ref();
+        for _ in text.bytes() {
+            byte_styles.push(link_style);
+        }
+        plain.push_str(text);
+    }
+
+    if plain.is_empty() {
+        return line.clone();
+    }
+
+    // Layer search matches on top of the link highlight.
+    for &(m, is_focused) in search_matches {
+        let style = if is_focused { focused_style } else { match_style };
+        let start = m.byte_start.min(byte_styles.len());
+        let end = m.byte_end.min(byte_styles.len());
+        for byte_style in byte_styles.iter_mut().take(end).skip(start) {
+            *byte_style = style;
+        }
+    }
+
+    // Reconstruct spans.
+    let mut result_spans: Vec<Span<'static>> = Vec::new();
+    if byte_styles.is_empty() {
+        return line.clone();
+    }
+
+    let mut run_start = 0;
+    let mut run_style = byte_styles[0];
+
+    for (i, _ch) in plain.char_indices().skip(1) {
+        if byte_styles[i] != run_style {
+            let text = &plain[run_start..i];
+            if !text.is_empty() {
+                result_spans.push(Span::styled(text.to_string(), run_style));
+            }
+            run_start = i;
+            run_style = byte_styles[i];
+        }
+    }
     let text = &plain[run_start..];
     if !text.is_empty() {
         result_spans.push(Span::styled(text.to_string(), run_style));

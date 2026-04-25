@@ -161,6 +161,7 @@ fn load_syntax_set() -> SyntaxSet {
             }
             Err(_) => {
                 debug_assert!(false, "failed to load bundled {name} syntax definition");
+                log::warn!("failed to load bundled {name} syntax definition");
             }
         }
     }
@@ -179,6 +180,7 @@ fn resolve_comment_color(
         Ok(s) => s,
         Err(_) => {
             debug_assert!(false, "failed to parse hardcoded 'comment' scope");
+            log::warn!("failed to parse hardcoded 'comment' scope");
             return None;
         }
     };

@@ -131,7 +131,8 @@ For `RenderedBlock::Image`:
 - These placeholder lines reserve the correct vertical space for scrolling
 
 For `RenderedBlock::ImageFallback`:
-- Emit `DocumentLine::Text(Line::from(format!("[image: {}]", alt_text)))` with styled alt text
+- Emit `DocumentLine::Text` with format `[image: alt_text (src_url)]` (or `[image: src_url]` if alt is empty)
+- Shows both the alt text and the source path/URL so users can identify which image failed
 
 **Standards note:** The index-based indirection pattern avoids borrow-checker conflicts.
 `DocumentLine` stores a `usize` index, not the `StatefulProtocol` itself.
@@ -206,17 +207,120 @@ Add a small test PNG to `testdata/test-image.png` (e.g., 100×100 solid color).
 
 **`images.rs`:**
 - `load_image` with valid path → returns `Ok((index, width, height))`
-- `load_image` with missing path → returns `Err`
+- `load_image` with missing path → returns `Err` with path in message
 - `load_image` with unsupported format → returns `Err`
+- `load_ascii_image` with missing path → returns `Err` with path in message
+- `load_image_from_memory` without picker → returns `Err` ("no graphics support")
 - `get_protocol` with valid index → returns reference
 
 **`parser.rs`:**
 - Image tag with loadable image → `Image` variant
-- Image tag with missing file → `ImageFallback` variant
-- Image inside a paragraph → handled correctly
+- Image tag with missing file → `ImageFallback` variant (preserves `src_url` and `alt_text`)
+- HTML `<img>` with missing file → `ImageFallback` variant
+- Image inside a list → fallback in children or URL in content spans
+- No `eprintln!()` warnings during image fallback (would corrupt TUI)
+
+**`layout.rs`:**
+- `ImageFallback` renders as `[image: alt_text (src_url)]` showing the source path
+- `ImageFallback` with empty alt renders as `[image: src_url]` (no empty parentheses)
+- Table cell `ImageFallback` also shows src_url
 
 **Integration tests:**
 - Render `testdata/images.md` without panic (image loading may fail in CI — fallback must work)
+
+---
+
+## 4.7 — Remote Image Fetch Control
+
+### CLI flag
+
+```rust
+/// Fetch remote images (http/https URLs) in the background.
+/// Without this flag, remote images show alt text fallback.
+#[arg(long)]
+pub fetch_remote_images: bool,
+```
+
+**Default:** `false` — remote images show `[image: alt_text]` without network I/O.
+
+### Precedence chain
+
+CLI `--fetch-remote-images` > env `MDINK_FETCH_REMOTE` > config `fetch_remote_images` > default (false).
+
+### Config key
+
+```json
+{"fetch_remote_images": true}
+```
+
+### Behavior
+
+When `fetch_remote=false`:
+- `load_and_emit_image()` in `parser.rs` emits `ImageFallback` instead of `ImagePending`
+- No URLs are sent to the background fetch thread
+- Cached images are still resolved (cache checked before the flag)
+
+When `fetch_remote=true`:
+- Original behavior: `ImagePending` → background fetch → cache → re-parse → `Image`/`AsciiImage`
+
+Interaction with other flags:
+- `--no-images` is checked first (broader suppression); `--fetch-remote-images` is irrelevant when images are fully disabled.
+- `--ascii-images` controls rendering format, independent of fetch behavior.
+
+---
+
+## 4.7 — Remote Image Lazy Loading
+
+### Motivation
+
+Remote markdown files often reference images via HTTP URLs (e.g., `![](https://example.com/img.png)`). Currently, `ImageManager::load_image()` only handles local paths via `self.base_path.join(src)`, so remote images fail immediately and fall back to alt text. Additionally, `Event::Resize` only re-flattens layout without re-loading images, causing stale dimensions.
+
+### New IR variant
+
+```rust
+/// A remote image awaiting background fetch.
+ImagePending {
+    url: String,
+    alt_text: String,
+}
+```
+
+### Updated `Image` variant
+
+```rust
+Image {
+    protocol_index: usize,
+    alt_text: String,
+    width_cells: u16,
+    height_cells: u16,
+    px_width: u32,   // natural pixel width for resize recalculation
+    px_height: u32,  // natural pixel height for resize recalculation
+}
+```
+
+### Cache architecture
+
+`ImageManager` gains a `HashMap<String, CachedImage>` mapping URL → decoded `DynamicImage`. Cache survives re-parse (same document) but is cleared on document change.
+
+- `clear_protocols()` — clears protocol vec, keeps cache (used for refresh / same-document re-parse)
+- `clear_all()` — clears protocols + cache + pending/failed tracking (used for new document)
+
+### Background fetch thread
+
+Uses the existing `mpsc::channel` + `std::thread::spawn` pattern (same as streaming stdin):
+
+1. Parser produces `ImagePending` blocks for uncached remote URLs
+2. `queue_pending_fetches()` walks blocks, sends URLs to fetch thread (dedup via `pending_urls` HashSet)
+3. Fetch thread calls `fetch_image(url)` — downloads via `ureq`, decodes via `image::load_from_memory`
+4. Main loop drains results, inserts into cache, re-parses (cache now warm → `ImagePending` resolves)
+
+### Resize fix
+
+Resize now triggers full re-parse + re-flatten instead of flatten-only. Cache is warm, so no network I/O. This ensures `width_cells`/`height_cells` are recomputed for the new terminal width.
+
+### Test data
+
+**`testdata/remote-images.md`:** Markdown with remote image URLs for manual testing.
 
 ---
 
@@ -225,19 +329,35 @@ Add a small test PNG to `testdata/test-image.png` (e.g., 100×100 solid color).
 - [ ] Images render via terminal graphics protocol (Sixel/Kitty/iTerm2/halfblocks)
 - [ ] Terminal protocol auto-detected at startup via `Picker::from_query_stdio()`
 - [ ] Images scale to fit terminal width (maintaining aspect ratio)
-- [ ] Missing/broken images gracefully fall back to `[image: alt text]`
+- [ ] Missing/broken images gracefully fall back to `[image: alt_text (src_url)]`
 - [ ] `--no-images` flag disables image rendering entirely
 - [ ] Image paths resolve relative to the markdown file's directory
 - [ ] Scrolling works correctly past images (correct height reservation)
 - [ ] No crashes on any terminal (graceful degradation)
 - [ ] `ImageManager` is a leaf module (no mdink-internal imports)
+- [ ] No `eprintln!()` in image loading/fallback code paths (would corrupt TUI display)
+- [ ] Image errors communicated via `ImageFallback` block content, not stderr
 - [ ] Renderer doesn't modify `App` state (split signature)
 - [ ] All `match` arms updated for new `Image`/`ImageFallback`/`ImageStart`/`ImageContinuation` variants
 - [ ] `cargo test` passes with all new tests
 - [ ] `cargo clippy -- -D warnings` clean
 - [ ] Phase 1–3 features still work (no regressions)
 - [ ] Phase gate checklist from [standards.md §10](standards.md) passes
-
-**Files created/modified:**
-- Created: `src/images.rs`, `testdata/images.md`, `testdata/test-image.png`
-- Modified: `Cargo.toml` (uncomment ratatui-image, image), `src/parser.rs`, `src/layout.rs`, `src/renderer.rs`, `src/main.rs`, `src/cli.rs`
+- [ ] Remote images (http/https URLs) load asynchronously via background thread
+- [ ] `--fetch-remote-images` flag opts in to remote image fetching (default: off)
+- [ ] `MDINK_FETCH_REMOTE` env var supported
+- [ ] config.json `fetch_remote_images` key supported
+- [ ] Remote images are cached; re-parse and resize reuse cache (no re-download)
+- [ ] `ImagePending` variant handled in all exhaustive match sites
+- [ ] Resize triggers re-parse with warm cache (correct image dimensions)
+- [ ] Failed remote images are tracked and not retried
+- [ ] Failed remote images degrade to `ImageFallback` on re-parse (not stuck as `[loading: ...]`)
+- [ ] `is_failed_url()` check in parser prevents re-emitting `ImagePending` for failed URLs
+- [ ] `clear_all()` called on document change; `clear_protocols()` keeps cache on same-document re-parse
+- [ ] HTML `<img src="..." alt="...">` tags are extracted from `Event::Html`/`Event::InlineHtml` and routed through `load_and_emit_image()`
+- [ ] `<img>` inside `<div>` blocks (skipped by parser) is detected via `on_skipping_event()` HTML handling
+- [ ] Image mode: pressing `i` while in image mode toggles it off (same as Esc)
+- [ ] Image mode: pressing Enter to open an image keeps image mode active (doesn't exit)
+- [ ] Image mode entry selects first visible image (not index 0); falls back to nearest via forward/backward search
+- Created: `src/images/mod.rs`, `src/images/tests.rs`, `testdata/images.md`, `testdata/test-image.png`, `testdata/remote-images.md`
+- Modified: `Cargo.toml` (uncomment ratatui-image, image), `src/parser/mod.rs`, `src/layout/mod.rs`, `src/renderer.rs`, `src/main.rs`, `src/cli.rs`

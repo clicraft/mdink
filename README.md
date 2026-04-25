@@ -22,7 +22,7 @@ mdink README.md
 - **Tables** — column alignment, CJK-aware width calculation
 - **Horizontal rules**
 - **Outline panel** — toggle a table-of-contents sidebar (`o`) with heading navigation, jump-to-heading, and resizable width
-- **Terminal images** — Sixel, Kitty, iTerm2, and half-block fallback; degrades gracefully to alt text
+- **Terminal images** — Sixel, Kitty, iTerm2, and half-block fallback; remote HTTP/HTTPS images load asynchronously with caching; degrades gracefully to alt text
 - **ASCII image rendering** — `--ascii-images` converts images to colored ASCII art using Unicode half-blocks; works on *every* terminal, no graphics protocol needed
 - **Images in tables** — embed images inside GFM table cells with automatic sizing
 - **Responsive layout** — re-flows at the correct width on every terminal resize
@@ -61,9 +61,31 @@ The `--ascii-images` flag renders images as colored Unicode half-block art — u
 | `G` / `End` | Jump to bottom |
 | `o` | Toggle outline panel |
 | `Tab` / `Shift+Tab` | Navigate outline headings |
-| `Enter` | Jump to selected heading |
+| `Enter` | Jump to selected heading (outline) or follow link (link mode) |
 | `<` / `>` | Shrink / grow outline panel |
+| `l` | Enter link navigation mode |
+| `i` | Enter image navigation mode |
+| `Backspace` | Go back to previous document |
 | `q` / `Esc` / `Ctrl+C` | Quit |
+
+## Link navigation
+
+Press `l` to enter link mode. All hyperlinks in the document are collected and can be cycled with `Tab` / `Shift+Tab`. The selected link's URL is shown in the status bar. Press `Enter` to follow the link:
+
+- **Local `.md` files** are loaded and rendered inside mdink
+- **Remote `.md` URLs** (http/https) are fetched and rendered inside mdink
+- **Other URLs** are opened with your system browser
+
+Press `Backspace` at any time to return to the previous document. Navigation history is preserved across multiple link follows.
+
+## Image navigation
+
+Press `i` to enter image mode. All images in the document (local files, remote URLs, ASCII art, fallback placeholders) are collected and can be cycled with `Tab` / `Shift+Tab`. The selected image's URL is shown in the status bar. Press `Enter` to open the image:
+
+- **Remote URLs** are opened in your system browser
+- **Local files** are opened with the system's default image viewer
+
+Press `Esc` to exit image mode.
 
 ## Image support
 
@@ -88,6 +110,8 @@ mdink --ascii-images README.md
 You can make this the default by adding `"ascii_images": true` to `~/.config/mdink/config.json`.
 
 On unsupported terminals without `--ascii-images`, images fall back to their alt text. Use `--no-images` to skip image rendering entirely.
+
+Remote images (`![alt](https://example.com/img.png)`) are fetched asynchronously in a background thread and cached in memory. They appear as `[loading: alt text]` placeholders while downloading, then render once ready. Cached images survive terminal resize and refresh without re-downloading.
 
 ## Minimum Rust version
 

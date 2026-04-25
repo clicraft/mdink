@@ -5,7 +5,7 @@
 //! `DocumentLine`s sized to fit a given terminal width.
 
 use pulldown_cmark::Alignment;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -22,6 +22,34 @@ pub struct HeadingEntry {
     pub line_index: usize,
 }
 
+/// A hyperlink collected during layout for link navigation.
+pub struct LinkEntry {
+    /// Index into `PreRenderedDocument::lines` where this link's block starts.
+    pub line_index: usize,
+    /// The link URL (from `StyledSpan::url`).
+    pub url: String,
+}
+
+/// An image entry collected during layout for image navigation.
+pub struct ImageEntry {
+    /// Index into `PreRenderedDocument::lines` where this image's block starts.
+    pub line_index: usize,
+    /// The image source URL or local file path.
+    pub url: String,
+}
+
+/// An inline math image within a text line, positioned at a specific column.
+pub struct InlineImageEntry {
+    /// Index into `PreRenderedDocument::lines` where this image appears.
+    pub line_index: usize,
+    /// Index into `ImageManager::protocols` for renderer access.
+    pub protocol_index: usize,
+    /// Column offset (in terminal cells) where the image starts within the line.
+    pub col_offset: u16,
+    /// Width of the image in terminal columns.
+    pub width: u16,
+}
+
 /// A pre-rendered document ready for viewport slicing and rendering.
 ///
 /// Contains all lines laid out for a specific terminal width. Created
@@ -33,6 +61,12 @@ pub struct PreRenderedDocument {
     pub total_height: usize,
     /// Headings (h1–h3) collected during layout for outline navigation.
     pub headings: Vec<HeadingEntry>,
+    /// Hyperlinks collected during layout for link navigation.
+    pub links: Vec<LinkEntry>,
+    /// Image entries collected during layout for image navigation.
+    pub images: Vec<ImageEntry>,
+    /// Inline math images with their column positions within text lines.
+    pub inline_images: Vec<InlineImageEntry>,
 }
 
 /// A single line of the pre-rendered document.
@@ -55,6 +89,124 @@ pub enum DocumentLine {
     ImageContinuation,
 }
 
+/// Extracts all hyperlink URLs from a block's inline content.
+///
+/// Walks the block recursively (lists, block quotes) and returns URLs
+/// in document order. Only text-content blocks yield links (per v1 scope).
+/// Uses exhaustive match per standards §8.3.
+fn extract_block_links(block: &RenderedBlock) -> Vec<String> {
+    match block {
+        RenderedBlock::Heading { content, .. }
+        | RenderedBlock::Paragraph { content } => {
+            content.iter().filter_map(|s| s.url.clone()).collect()
+        }
+        RenderedBlock::List { items, .. } => {
+            let mut links = Vec::new();
+            for item in items {
+                links.extend(item.content.iter().filter_map(|s| s.url.clone()));
+                for child in &item.children {
+                    links.extend(extract_block_links(child));
+                }
+            }
+            links
+        }
+        RenderedBlock::BlockQuote { children } => {
+            let mut links = Vec::new();
+            for child in children {
+                links.extend(extract_block_links(child));
+            }
+            links
+        }
+        RenderedBlock::Table { headers, rows, .. } => {
+            let mut links = Vec::new();
+            for cell in headers {
+                links.extend(extract_table_cell_links(cell));
+            }
+            for row in rows {
+                for cell in row {
+                    links.extend(extract_table_cell_links(cell));
+                }
+            }
+            links
+        }
+        // No links in these block types.
+        RenderedBlock::CodeBlock { .. }
+        | RenderedBlock::ThematicBreak
+        | RenderedBlock::Spacer { .. }
+        | RenderedBlock::Image { .. }
+        | RenderedBlock::AsciiImage { .. }
+        | RenderedBlock::ImageFallback { .. }
+        | RenderedBlock::ImagePending { .. }
+        | RenderedBlock::MathUnicode { .. }
+        | RenderedBlock::MathImage { .. } => Vec::new(),
+    }
+}
+
+/// Extracts hyperlink URLs from a single table cell.
+fn extract_table_cell_links(cell: &TableCell) -> Vec<String> {
+    match cell {
+        TableCell::Text(spans) => spans.iter().filter_map(|s| s.url.clone()).collect(),
+        TableCell::Block(block) => extract_block_links(block),
+    }
+}
+
+/// Extracts image source URLs from a `RenderedBlock`.
+///
+/// Walks the block recursively (lists, block quotes, tables) and returns
+/// image URLs in document order. Uses exhaustive match per standards §8.3.
+fn extract_block_images(block: &RenderedBlock) -> Vec<String> {
+    match block {
+        RenderedBlock::Image { src_url, .. } => vec![src_url.clone()],
+        RenderedBlock::AsciiImage { src_url, .. } => vec![src_url.clone()],
+        RenderedBlock::ImageFallback { src_url, .. } => vec![src_url.clone()],
+        RenderedBlock::ImagePending { url, .. } => vec![url.clone()],
+        RenderedBlock::List { items, .. } => {
+            let mut imgs = Vec::new();
+            for item in items {
+                for child in &item.children {
+                    imgs.extend(extract_block_images(child));
+                }
+            }
+            imgs
+        }
+        RenderedBlock::BlockQuote { children } => {
+            let mut imgs = Vec::new();
+            for child in children {
+                imgs.extend(extract_block_images(child));
+            }
+            imgs
+        }
+        RenderedBlock::Table { headers, rows, .. } => {
+            let mut imgs = Vec::new();
+            for cell in headers {
+                imgs.extend(extract_table_cell_images(cell));
+            }
+            for row in rows {
+                for cell in row {
+                    imgs.extend(extract_table_cell_images(cell));
+                }
+            }
+            imgs
+        }
+        // No images in these block types.
+        RenderedBlock::Heading { .. }
+        | RenderedBlock::Paragraph { .. }
+        | RenderedBlock::CodeBlock { .. }
+        | RenderedBlock::ThematicBreak
+        | RenderedBlock::Spacer { .. }
+        | RenderedBlock::MathUnicode { .. }
+        | RenderedBlock::MathImage { .. } => Vec::new(),
+    }
+}
+
+/// Extracts image source URLs from a single table cell.
+fn extract_table_cell_images(cell: &TableCell) -> Vec<String> {
+    match cell {
+        TableCell::Text(_) => Vec::new(),
+        TableCell::Block(block) => extract_block_images(block),
+    }
+}
+
 /// Flattens a sequence of `RenderedBlock`s into a `PreRenderedDocument`.
 ///
 /// Each block is converted to one or more `DocumentLine`s. Text blocks
@@ -63,6 +215,9 @@ pub enum DocumentLine {
 pub fn flatten(blocks: &[RenderedBlock], width: u16, theme: &MarkdownTheme) -> PreRenderedDocument {
     let mut lines: Vec<DocumentLine> = Vec::new();
     let mut headings: Vec<HeadingEntry> = Vec::new();
+    let mut links: Vec<LinkEntry> = Vec::new();
+    let mut images: Vec<ImageEntry> = Vec::new();
+    let mut inline_images: Vec<InlineImageEntry> = Vec::new();
     // Clamp to minimum width of 1 to avoid undefined textwrap behavior.
     let width = (width as usize).max(1);
 
@@ -84,33 +239,130 @@ pub fn flatten(blocks: &[RenderedBlock], width: u16, theme: &MarkdownTheme) -> P
             }
         }
 
-        lines.extend(flatten_single_block(block, width, 0, theme));
+        let block_start = lines.len();
+        let block_images = extract_block_images(block);
+        match block {
+            RenderedBlock::Table { headers, alignments, rows } => {
+                // Tables need per-row link tracking for correct highlighting.
+                let (table_lines, table_link_offsets) =
+                    flatten_table(headers, alignments, rows, width, theme);
+                for (offset, url) in table_link_offsets {
+                    links.push(LinkEntry {
+                        line_index: block_start + offset,
+                        url,
+                    });
+                }
+                lines.extend(table_lines);
+            }
+            RenderedBlock::List { .. } => {
+                // Lists need per-item link tracking for correct highlighting.
+                let (list_lines, list_link_offsets, list_inline_metas) =
+                    flatten_block_with_links(block, width, 0, theme);
+                for (offset, url) in list_link_offsets {
+                    links.push(LinkEntry {
+                        line_index: block_start + offset,
+                        url,
+                    });
+                }
+                // Collect inline image metadata with absolute line indices.
+                for (rel_line, metas) in list_inline_metas.iter().enumerate() {
+                    for meta in metas {
+                        inline_images.push(InlineImageEntry {
+                            line_index: block_start + rel_line,
+                            protocol_index: meta.protocol_index,
+                            col_offset: meta.col_offset,
+                            width: meta.width,
+                        });
+                    }
+                }
+                lines.extend(list_lines);
+            }
+            _ => {
+                let block_links = extract_block_links(block);
+                let (block_lines, _link_offsets, block_inline_metas) =
+                    flatten_block_with_links(block, width, 0, theme);
+                // Collect inline image metadata with absolute line indices.
+                for (rel_line, metas) in block_inline_metas.iter().enumerate() {
+                    for meta in metas {
+                        inline_images.push(InlineImageEntry {
+                            line_index: block_start + rel_line,
+                            protocol_index: meta.protocol_index,
+                            col_offset: meta.col_offset,
+                            width: meta.width,
+                        });
+                    }
+                }
+                lines.extend(block_lines);
+                for url in block_links {
+                    links.push(LinkEntry {
+                        line_index: block_start,
+                        url,
+                    });
+                }
+            }
+        }
+        for url in block_images {
+            images.push(ImageEntry {
+                line_index: block_start,
+                url,
+            });
+        }
     }
 
     let total_height = lines.len();
-    PreRenderedDocument { lines, total_height, headings }
+    PreRenderedDocument { lines, total_height, headings, links, images, inline_images }
 }
 
-/// Flattens a single `RenderedBlock` into a `Vec<DocumentLine>`.
+/// Flattens a single `RenderedBlock` into `Vec<DocumentLine>`.
 ///
 /// `list_depth` is the current nesting depth of the enclosing list (0 = top-level).
 /// Used by `flatten_list` when recursively flattening child blocks.
+/// Discards inline image metadata (not needed inside list items for top-level collection).
 fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, theme: &MarkdownTheme) -> Vec<DocumentLine> {
+    flatten_block_with_links(block, width, list_depth, theme).0
+}
+
+/// Flattens a block into lines, per-row link offsets, and inline image metadata.
+///
+/// Returns `(lines, link_offsets, inline_image_metas)` where link_offsets are
+/// relative to the start of the returned lines. Only List and Table blocks produce
+/// non-empty link_offsets; other blocks return empty. Inline image metadata is
+/// propagated from text-containing blocks.
+#[allow(clippy::type_complexity)]
+fn flatten_block_with_links(block: &RenderedBlock, width: usize, list_depth: usize, theme: &MarkdownTheme) -> (Vec<DocumentLine>, Vec<(usize, String)>, Vec<Vec<InlineImageMeta>>) {
+    match block {
+        RenderedBlock::List { ordered, start, items } => {
+            let (lines, link_offsets, inline_metas) = flatten_list(items, *ordered, *start, width, list_depth, theme);
+            (lines, link_offsets, inline_metas)
+        }
+        RenderedBlock::Table { headers, alignments, rows } => {
+            let (lines, link_offsets) = flatten_table(headers, alignments, rows, width, theme);
+            (lines, link_offsets, Vec::new())
+        }
+        other => {
+            let (lines, metas) = flatten_plain_block(other, width, list_depth, theme);
+            (lines, Vec::new(), metas)
+        }
+    }
+}
+
+/// Flattens a non-List, non-Table block into lines (no per-row link tracking).
+fn flatten_plain_block(block: &RenderedBlock, width: usize, list_depth: usize, theme: &MarkdownTheme) -> (Vec<DocumentLine>, Vec<Vec<InlineImageMeta>>) {
     match block {
         RenderedBlock::Heading { content, .. } => {
-            let wrapped = wrap_styled_spans(content, width);
+            let (wrapped, metas) = wrap_styled_spans(content, width);
             if wrapped.is_empty() {
-                vec![DocumentLine::Empty]
+                (vec![DocumentLine::Empty], metas)
             } else {
-                wrapped.into_iter().map(DocumentLine::Text).collect()
+                (wrapped.into_iter().map(DocumentLine::Text).collect(), metas)
             }
         }
         RenderedBlock::Paragraph { content } => {
-            let wrapped = wrap_styled_spans(content, width);
+            let (wrapped, metas) = wrap_styled_spans(content, width);
             if wrapped.is_empty() {
-                vec![DocumentLine::Empty]
+                (vec![DocumentLine::Empty], metas)
             } else {
-                wrapped.into_iter().map(DocumentLine::Text).collect()
+                (wrapped.into_iter().map(DocumentLine::Text).collect(), metas)
             }
         }
         RenderedBlock::CodeBlock { language, highlighted_lines } => {
@@ -127,55 +379,109 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, 
             for line in highlighted_lines {
                 result.push(DocumentLine::Code(line.clone()));
             }
-            result
+            (result, Vec::new())
         }
-        RenderedBlock::ThematicBreak => vec![DocumentLine::Rule],
+        RenderedBlock::ThematicBreak => (vec![DocumentLine::Rule], Vec::new()),
         RenderedBlock::Spacer { lines: count } => {
-            (0..*count).map(|_| DocumentLine::Empty).collect()
+            ((0..*count).map(|_| DocumentLine::Empty).collect(), Vec::new())
         }
-        RenderedBlock::List { ordered, start, items } => {
-            flatten_list(items, *ordered, *start, width, list_depth, theme)
+        RenderedBlock::BlockQuote { children } => {
+            let (lines, metas) = flatten_block_quote_with_metas(children, width, list_depth, theme);
+            (lines, metas)
         }
-        RenderedBlock::BlockQuote { children } => flatten_block_quote(children, width, list_depth, theme),
-        RenderedBlock::Table { headers, alignments, rows } => {
-            flatten_table(headers, alignments, rows, width, theme)
-        }
-        RenderedBlock::AsciiImage { lines, .. } => {
-            lines.iter().map(|l| DocumentLine::AsciiArt(l.clone())).collect()
+        RenderedBlock::AsciiImage { lines, src_url: _, .. } => {
+            (lines.iter().map(|l| DocumentLine::AsciiArt(l.clone())).collect(), Vec::new())
         }
         // Phase 4: images are rendered by the renderer via StatefulImage.
         // Layout emits ImageStart for the first row (renderer draws there) and
         // ImageContinuation for remaining rows (reserve scroll space).
-        RenderedBlock::Image { protocol_index, height_cells, alt_text, .. } => {
+        RenderedBlock::Image { protocol_index, height_cells, alt_text, src_url: _, .. } => {
             let height = *height_cells;
             if height == 0 {
                 // Degenerate case: emit a fallback text line so the image
                 // is not completely invisible.
-                return vec![DocumentLine::Text(Line::from(Span::raw(
+                return (vec![DocumentLine::Text(Line::from(Span::raw(
                     format!("[image: {alt_text}]"),
-                )))];
+                )))], Vec::new());
             }
             let mut lines = Vec::with_capacity(height as usize);
             lines.push(DocumentLine::ImageStart { protocol_index: *protocol_index, height });
             for _ in 1..height {
                 lines.push(DocumentLine::ImageContinuation);
             }
-            lines
+            (lines, Vec::new())
         }
-        RenderedBlock::ImageFallback { alt_text } => {
-            let wrapped = wrap_styled_spans(
+        RenderedBlock::ImageFallback { alt_text, src_url } => {
+            let label = if alt_text.is_empty() {
+                format!("[image: {}]", src_url)
+            } else {
+                format!("[image: {} ({})]", alt_text, src_url)
+            };
+            let (wrapped, _metas) = wrap_styled_spans(
                 &[crate::parser::StyledSpan {
-                    text: format!("[image: {}]", alt_text),
+                    text: label,
                     style: theme::inline_style(&theme.image_alt),
                     url: None,
+                    math_latex: String::new(),
+                    math_image: None,
                 }],
                 width,
             );
             if wrapped.is_empty() {
-                vec![DocumentLine::Empty]
+                (vec![DocumentLine::Empty], Vec::new())
             } else {
-                wrapped.into_iter().map(DocumentLine::Text).collect()
+                (wrapped.into_iter().map(DocumentLine::Text).collect(), Vec::new())
             }
+        }
+        RenderedBlock::ImagePending { alt_text, .. } => {
+            // Show dim placeholder while remote image loads.
+            let (wrapped, _metas) = wrap_styled_spans(
+                &[crate::parser::StyledSpan {
+                    text: format!("[loading: {}]", if alt_text.is_empty() { "image" } else { alt_text }),
+                    style: Style::default().add_modifier(Modifier::DIM),
+                    url: None,
+                    math_latex: String::new(),
+                    math_image: None,
+                }],
+                width,
+            );
+            if wrapped.is_empty() {
+                (vec![DocumentLine::Empty], Vec::new())
+            } else {
+                (wrapped.into_iter().map(DocumentLine::Text).collect(), Vec::new())
+            }
+        }
+        // List and Table are handled by flatten_block_with_links, but we need
+        // these arms for exhaustiveness. They should not be reached directly.
+        RenderedBlock::List { ordered, start, items } => {
+            let (lines, _link_offsets, metas) = flatten_list(items, *ordered, *start, width, list_depth, theme);
+            (lines, metas)
+        }
+        RenderedBlock::Table { headers, alignments, rows } => {
+            let (lines, _link_offsets) = flatten_table(headers, alignments, rows, width, theme);
+            (lines, Vec::new())
+        }
+        // Display math: Unicode text (wraps like a Paragraph).
+        RenderedBlock::MathUnicode { content, raw_latex: _ } => {
+            let (wrapped, metas) = wrap_styled_spans(content, width);
+            if wrapped.is_empty() {
+                (vec![DocumentLine::Empty], metas)
+            } else {
+                (wrapped.into_iter().map(DocumentLine::Text).collect(), metas)
+            }
+        }
+        // Display math: pixel image (same layout as Image).
+        RenderedBlock::MathImage { protocol_index, height_cells, raw_latex: _, .. } => {
+            let height = *height_cells;
+            if height == 0 {
+                return (vec![DocumentLine::Empty], Vec::new());
+            }
+            let mut lines = Vec::with_capacity(height as usize);
+            lines.push(DocumentLine::ImageStart { protocol_index: *protocol_index, height });
+            for _ in 1..height {
+                lines.push(DocumentLine::ImageContinuation);
+            }
+            (lines, Vec::new())
         }
     }
 }
@@ -184,8 +490,13 @@ fn flatten_single_block(block: &RenderedBlock, width: usize, list_depth: usize, 
 
 /// Flattens a list into `DocumentLine`s with bullet/number prefixes and indentation.
 ///
+/// Returns `(lines, link_offsets)` where each `link_offsets` entry is
+/// `(row_offset_within_lines, url)` — the offset is relative to the start
+/// of the returned lines vector, so the caller adjusts by `block_start`.
+///
 /// Bullet characters and task markers are configured by the theme.
 /// Ordered lists use `n.` where `n = start + index`.
+#[allow(clippy::type_complexity)]
 fn flatten_list(
     items: &[ListItem],
     ordered: bool,
@@ -193,9 +504,11 @@ fn flatten_list(
     width: usize,
     depth: usize,
     theme: &MarkdownTheme,
-) -> Vec<DocumentLine> {
+) -> (Vec<DocumentLine>, Vec<(usize, String)>, Vec<Vec<InlineImageMeta>>) {
     let indent = " ".repeat(theme.list.indent_size as usize * depth);
     let mut lines = Vec::new();
+    let mut link_offsets: Vec<(usize, String)> = Vec::new();
+    let mut all_inline_metas: Vec<Vec<InlineImageMeta>> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
         let (prefix_str, marker_style) = if let Some(checked) = item.task {
@@ -219,9 +532,10 @@ fn flatten_list(
         let first_prefix_width = indent.width() + prefix_str.width() + 1;
         // Continuation lines align with the start of the first line's content.
         let cont_prefix = " ".repeat(first_prefix_width);
+        let cont_prefix_width = first_prefix_width;
 
         let content_width = width.saturating_sub(first_prefix_width).max(1);
-        let wrapped = wrap_styled_spans(&item.content, content_width);
+        let (wrapped, inline_metas) = wrap_styled_spans(&item.content, content_width);
 
         // Build the first-line prefix as styled spans: indent (raw) + marker (styled) + space (raw).
         let prefix_spans = vec![
@@ -230,11 +544,19 @@ fn flatten_list(
             Span::raw(" ".to_string()),
         ];
 
+        // Collect links from this item's inline content at the current line offset.
+        let item_line_start = lines.len();
+        for url in item.content.iter().filter_map(|s| s.url.clone()) {
+            link_offsets.push((item_line_start, url));
+        }
+
         if wrapped.is_empty() {
             // Empty item — emit just the prefix.
             lines.push(DocumentLine::Text(Line::from(prefix_spans)));
+            all_inline_metas.push(Vec::new());
         } else {
             for (j, content_line) in wrapped.into_iter().enumerate() {
+                let prefix_width = if j == 0 { first_prefix_width } else { cont_prefix_width };
                 let mut spans = if j == 0 {
                     prefix_spans.clone()
                 } else {
@@ -242,6 +564,14 @@ fn flatten_list(
                 };
                 spans.extend(content_line.spans);
                 lines.push(DocumentLine::Text(Line::from(spans)));
+
+                // Shift inline image col_offsets by the prefix width.
+                let line_metas = inline_metas.get(j).cloned().unwrap_or_default();
+                let shifted = line_metas.into_iter().map(|m| InlineImageMeta {
+                    col_offset: m.col_offset + prefix_width as u16,
+                    ..m
+                }).collect();
+                all_inline_metas.push(shifted);
             }
         }
 
@@ -251,7 +581,19 @@ fn flatten_list(
         for child in &item.children {
             match child {
                 RenderedBlock::List { .. } => {
-                    let child_lines = flatten_single_block(child, width, depth + 1, theme);
+                    let (child_lines, child_link_offsets, child_inline_metas) =
+                        flatten_block_with_links(child, width, depth + 1, theme);
+                    for (offset, url) in child_link_offsets {
+                        link_offsets.push((lines.len() + offset, url));
+                    }
+                    // Shift child inline image col_offsets by the continuation prefix width.
+                    for metas in child_inline_metas {
+                        let shifted = metas.into_iter().map(|m| InlineImageMeta {
+                            col_offset: m.col_offset + cont_prefix_width as u16,
+                            ..m
+                        }).collect();
+                        all_inline_metas.push(shifted);
+                    }
                     lines.extend(child_lines);
                 }
                 _ => {
@@ -263,18 +605,24 @@ fn flatten_list(
                                 let mut spans = vec![Span::raw(cont_prefix.clone())];
                                 spans.extend(l.spans);
                                 lines.push(DocumentLine::Text(Line::from(spans)));
+                                all_inline_metas.push(Vec::new());
                             }
                             DocumentLine::Code(l) => {
                                 let mut spans = vec![Span::raw(cont_prefix.clone())];
                                 spans.extend(l.spans);
                                 lines.push(DocumentLine::Code(Line::from(spans)));
+                                all_inline_metas.push(Vec::new());
                             }
                             DocumentLine::AsciiArt(l) => {
                                 let mut spans = vec![Span::raw(cont_prefix.clone())];
                                 spans.extend(l.spans);
                                 lines.push(DocumentLine::AsciiArt(Line::from(spans)));
+                                all_inline_metas.push(Vec::new());
                             }
-                            other => lines.push(other),
+                            other => {
+                                lines.push(other);
+                                all_inline_metas.push(Vec::new());
+                            }
                         }
                     }
                 }
@@ -282,7 +630,7 @@ fn flatten_list(
         }
     }
 
-    lines
+    (lines, link_offsets, all_inline_metas)
 }
 
 // ── Block quote layout ───────────────────────────────────────────────────────
@@ -361,6 +709,13 @@ fn flatten_block_quote(children: &[RenderedBlock], width: usize, list_depth: usi
     result
 }
 
+/// Wrapper around `flatten_block_quote` that returns the tuple format
+/// expected by `flatten_plain_block`. Inline image metadata is not
+/// propagated from block quotes (prefix offsets would be wrong).
+fn flatten_block_quote_with_metas(children: &[RenderedBlock], width: usize, list_depth: usize, theme: &MarkdownTheme) -> (Vec<DocumentLine>, Vec<Vec<InlineImageMeta>>) {
+    (flatten_block_quote(children, width, list_depth, theme), Vec::new())
+}
+
 // ── Table layout ─────────────────────────────────────────────────────────────
 
 /// Flattens a GFM table into `DocumentLine`s: header row(s), separator, body rows.
@@ -377,10 +732,10 @@ fn flatten_table(
     rows: &[Vec<TableCell>],
     width: usize,
     theme: &MarkdownTheme,
-) -> Vec<DocumentLine> {
+) -> (Vec<DocumentLine>, Vec<(usize, String)>) {
     let ncols = headers.len();
     if ncols == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Calculate column widths: max of header and all body cells in that column.
@@ -412,6 +767,7 @@ fn flatten_table(
     let sep_style = theme::table_border_style(&theme.table);
 
     let mut result = Vec::new();
+    let mut link_offsets: Vec<(usize, String)> = Vec::new();
 
     // Header row (may be multi-line if headers contain images).
     let header_cell_lines: Vec<Vec<Vec<Span<'static>>>> = headers
@@ -422,6 +778,12 @@ fn flatten_table(
             flatten_cell_to_lines(cell, col_widths[col], align, Some(header_style))
         })
         .collect();
+    // Collect links from header cells at the header row offset.
+    for cell in headers {
+        for url in extract_table_cell_links(cell) {
+            link_offsets.push((result.len(), url));
+        }
+    }
     result.extend(build_multi_line_row(&header_cell_lines, &col_widths));
 
     // Separator row.
@@ -450,11 +812,17 @@ fn flatten_table(
         if prev_row_was_multi || (row_height > 1 && !result.is_empty()) {
             result.push(build_blank_table_row(&col_widths));
         }
+        // Collect links from body cells at the current row offset.
+        for cell in row {
+            for url in extract_table_cell_links(cell) {
+                link_offsets.push((result.len(), url));
+            }
+        }
         result.extend(build_multi_line_row(&cell_lines, &col_widths));
         prev_row_was_multi = row_height > 1;
     }
 
-    result
+    (result, link_offsets)
 }
 
 /// Returns the display width of a single table cell for column-width calculation.
@@ -465,8 +833,12 @@ fn cell_display_width(cell: &TableCell) -> usize {
             .first()
             .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
             .unwrap_or(0),
-        TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
-            format!("[image: {}]", alt_text).width()
+        TableCell::Block(RenderedBlock::ImageFallback { alt_text, src_url }) => {
+            if alt_text.is_empty() {
+                format!("[image: {}]", src_url).width()
+            } else {
+                format!("[image: {} ({})]", alt_text, src_url).width()
+            }
         }
         TableCell::Block(_) => 5, // "[...]"
     }
@@ -484,7 +856,7 @@ fn flatten_cell_to_lines(
 ) -> Vec<Vec<Span<'static>>> {
     let lines = match cell {
         TableCell::Text(spans) => {
-            let wrapped = wrap_styled_spans(spans, col_width);
+            let (wrapped, _metas) = wrap_styled_spans(spans, col_width);
             wrapped
                 .into_iter()
                 .map(|line| {
@@ -528,8 +900,12 @@ fn flatten_cell_to_lines(
                 .map(|line| truncate_spans_to_width(&line.spans, col_width))
                 .collect()
         }
-        TableCell::Block(RenderedBlock::ImageFallback { alt_text }) => {
-            let text = format!("[image: {}]", alt_text);
+        TableCell::Block(RenderedBlock::ImageFallback { alt_text, src_url }) => {
+            let text = if alt_text.is_empty() {
+                format!("[image: {}]", src_url)
+            } else {
+                format!("[image: {} ({})]", alt_text, src_url)
+            };
             let padded = align_cell(&text, col_width, alignment);
             let span = if let Some(style) = header_style {
                 Span::styled(padded, style)
@@ -663,18 +1039,31 @@ fn align_cell(text: &str, width: usize, alignment: Alignment) -> String {
 
 // ── Text wrapping ─────────────────────────────────────────────────────────────
 
+/// Per-line inline image metadata collected during word wrapping.
+#[derive(Clone)]
+struct InlineImageMeta {
+    /// Index into `ImageManager::protocols` for renderer access.
+    protocol_index: usize,
+    /// Column offset within the line where the image starts.
+    col_offset: u16,
+    /// Width of the image in terminal columns.
+    width: u16,
+}
+
 /// Wraps styled spans to fit within a given width, preserving styles.
 ///
 /// Algorithm:
 /// 1. Concatenate all span text into a single plain-text string, building
-///    a parallel byte-to-style map.
+///    parallel byte-to-style and byte-to-math-image maps.
 /// 2. Use `textwrap::wrap()` to determine line break positions.
 /// 3. Walk a cursor through the plain text for each wrapped line, skipping
 ///    whitespace break points, then extract styled spans by consulting
 ///    the byte-to-style map.
-fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
+///
+/// Returns `(wrapped_lines, per_line_inline_image_metadata)`.
+fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> (Vec<Line<'static>>, Vec<Vec<InlineImageMeta>>) {
     if spans.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Handle hard breaks (\n) by splitting into sub-paragraphs.
@@ -682,21 +1071,26 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
         return wrap_with_hard_breaks(spans, width);
     }
 
-    // 1. Build plain text and parallel byte-to-style/url maps.
+    // 1. Build plain text and parallel byte-to-style/url/math_image maps.
     let mut plain = String::new();
     let mut byte_styles: Vec<Style> = Vec::new();
     let mut byte_urls: Vec<Option<&str>> = Vec::new();
+    // Track which byte offsets belong to an inline math image span.
+    // Each entry is (protocol_index, width_cells) for the containing span.
+    let mut byte_math_image: Vec<Option<(usize, u16)>> = Vec::new();
     for span in spans {
         let url_ref = span.url.as_deref();
+        let math_meta = span.math_image.as_ref().map(|m| (m.protocol_index, m.width_cells));
         for _ in span.text.bytes() {
             byte_styles.push(span.style);
             byte_urls.push(url_ref);
+            byte_math_image.push(math_meta);
         }
         plain.push_str(&span.text);
     }
 
     if plain.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // 2. Wrap the plain text.
@@ -706,6 +1100,7 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
 
     // 3. Map each wrapped line back to styled spans using a monotonic cursor.
     let mut result = Vec::with_capacity(wrapped_lines.len());
+    let mut all_metas = Vec::with_capacity(wrapped_lines.len());
     let mut cursor: usize = 0;
 
     for wrapped_text in &wrapped_lines {
@@ -733,6 +1128,7 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
         // boundary (panic). Fall back to emitting the wrapped text directly instead.
         if cursor >= plain.len() && !plain.ends_with(wrapped_str) {
             result.push(Line::from(Span::raw(wrapped_str.to_string())));
+            all_metas.push(Vec::new());
             continue;
         }
 
@@ -745,6 +1141,7 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
         // happen with Cow::Owned from textwrap), emit the text directly.
         if !plain.is_char_boundary(line_end) {
             result.push(Line::from(Span::raw(wrapped_str.to_string())));
+            all_metas.push(Vec::new());
             cursor = line_end.min(plain.len());
             continue;
         }
@@ -752,10 +1149,61 @@ fn wrap_styled_spans(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
         let line_spans = build_spans_for_range(&plain, &byte_styles, &byte_urls, line_start, line_end);
         result.push(Line::from(line_spans));
 
+        // Collect inline math image metadata for this line.
+        // Walk the byte range and compute column offsets.
+        let line_metas = collect_inline_image_metas(
+            &plain, &byte_math_image, line_start, line_end,
+        );
+        all_metas.push(line_metas);
+
         cursor = line_end;
     }
 
-    result
+    (result, all_metas)
+}
+
+/// Collects inline math image metadata for a byte range of the plain text.
+///
+/// Walks through the range by characters, tracking the running display width
+/// to compute `col_offset` for each inline math image span encountered.
+fn collect_inline_image_metas(
+    plain: &str,
+    byte_math_image: &[Option<(usize, u16)>],
+    line_start: usize,
+    line_end: usize,
+) -> Vec<InlineImageMeta> {
+    let mut metas = Vec::new();
+    let mut col: u16 = 0;
+    let mut i = line_start;
+
+    while i < line_end {
+        // Check if this byte starts (or is inside) a math image span.
+        if let Some((protocol_index, width_cells)) = byte_math_image.get(i).and_then(|m| *m) {
+            // Advance to end of this math image span.
+            while i < line_end && byte_math_image.get(i).and_then(|m| *m) == Some((protocol_index, width_cells)) {
+                // Safe: loop invariant guarantees i < line_end <= plain.len().
+                let ch = plain[i..].chars().next().unwrap();
+                col += ch.width().unwrap_or(0) as u16;
+                i += ch.len_utf8();
+            }
+            // Record the metadata with col_offset at the start of the span.
+            // col_offset = col minus the width we just counted (it was the image width).
+            let img_col = col - width_cells;
+            metas.push(InlineImageMeta {
+                protocol_index,
+                col_offset: img_col,
+                width: width_cells,
+            });
+        } else {
+            // Regular character — advance by one character.
+            // Safe: loop invariant guarantees i < line_end <= plain.len().
+            let ch = plain[i..].chars().next().unwrap();
+            col += ch.width().unwrap_or(0) as u16;
+            i += ch.len_utf8();
+        }
+    }
+
+    metas
 }
 
 /// Builds styled `Span`s for a byte range of the plain text.
@@ -847,7 +1295,7 @@ fn language_display_name(language: &str) -> &str {
 
 /// Handles text containing hard breaks by splitting at `\n` boundaries
 /// first, then wrapping each segment independently.
-fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static>> {
+fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> (Vec<Line<'static>>, Vec<Vec<InlineImageMeta>>) {
     let mut groups: Vec<Vec<StyledSpan>> = Vec::new();
     let mut current_group: Vec<StyledSpan> = Vec::new();
 
@@ -860,6 +1308,8 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
                         text: part.to_string(),
                         style: span.style,
                         url: span.url.clone(),
+                        math_latex: String::new(),
+                        math_image: None,
                     });
                 }
                 if i < parts.len() - 1 {
@@ -871,6 +1321,8 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
                 text: span.text.clone(),
                 style: span.style,
                 url: span.url.clone(),
+                math_latex: String::new(),
+                math_image: None,
             });
         }
     }
@@ -879,16 +1331,19 @@ fn wrap_with_hard_breaks(spans: &[StyledSpan], width: usize) -> Vec<Line<'static
     }
 
     let mut result = Vec::new();
+    let mut all_metas = Vec::new();
     for group in &groups {
-        let wrapped = wrap_styled_spans(group, width);
+        let (wrapped, metas) = wrap_styled_spans(group, width);
         if wrapped.is_empty() {
             result.push(Line::from(Vec::<Span<'static>>::new()));
+            all_metas.push(Vec::new());
         } else {
             result.extend(wrapped);
+            all_metas.extend(metas);
         }
     }
 
-    result
+    (result, all_metas)
 }
 
 #[cfg(test)]

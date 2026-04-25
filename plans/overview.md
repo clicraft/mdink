@@ -22,6 +22,13 @@
 | [phase6_polish.md](phase6_polish.md) | Links, footnotes, search, heading nav, pager mode |
 | [phase7_packaging.md](phase7_packaging.md) | CI/CD, curl installer, .deb/apt, man pages, completions |
 | [font_slot_strategy.md](font_slot_strategy.md) | Terminal font slot mapping for typographic hierarchy (Stage 1: immediate, Stage 2: Phase 5) |
+| [feature_math.md](feature_math.md) | Hybrid LaTeX math rendering: Unicode instant + async pixel via ratex-svg + resvg pipeline with terminal bg detection (OSC 11) and contrasting formula colors. Inline math embedded within text lines via NBSP placeholders + StatefulImage overlay. CJK font support via resvg fontdb with system font fallback. Source pre-processing via `normalize_math_delimiters()` handles `$ ...$` whitespace patterns. |
+| [feature_nav.md](feature_nav.md) | Remote URL fetch, file browser, link/image navigation (visible-first entry via `nearest_entry_index`), file watcher (mtime-based auto-reload with scroll preservation), goto line (`:42` jump-to-line input mode) |
+| [feature_search.md](feature_search.md) | `/`-triggered find-in-page with match highlighting and `n`/`N` navigation |
+| [feature_rendering.md](feature_rendering.md) | OSC 8 clickable links, Mermaid diagram rendering |
+| [feature_theme_print.md](feature_theme_print.md) | Theme cycling (`t` key), print mode / PDF export |
+| [feature_advanced.md](feature_advanced.md) | LaTeX math Unicode rendering, streaming stdin with auto-scroll, local file error handling, terminal diagnostics logging (protocol detection, MathEngine state) |
+| [feature_diagnostics.md](feature_diagnostics.md) | Terminal protocol detection diagnostics, Halfblocks→Unicode math fallback, `detect_terminal_identity()` helper |
 
 ---
 
@@ -50,27 +57,48 @@ mdink/
 ├── src/
 │   ├── main.rs                       # CLI entry point, wiring, event loop
 │   ├── cli.rs                        # clap definition (separate for xtask reuse)
-│   ├── app.rs                        # App state: scroll position, viewport, mode
-│   ├── parser.rs                     # pulldown-cmark event stream → RenderedBlock
+│   ├── config.rs                     # Config file loading (JSON)
+│   ├── font_detect.rs                # Terminal font detection (leaf module)
+│   ├── pdf.rs                        # PDF export with font embedding
+│   ├── app/                          # Application state module
+│   │   ├── mod.rs                    # App state: scroll position, viewport, modes
+│   │   └── tests.rs                  # App state unit tests
+│   ├── parser/                       # Parser module
+│   │   ├── mod.rs                    # pulldown-cmark event stream → RenderedBlock
+│   │   └── tests.rs                  # Parser unit tests
 │   ├── renderer.rs                   # DocumentLine → Frame (ratatui rendering)
-│   ├── highlight.rs                  # syntect integration + syntect→ratatui bridge
-│   ├── images.rs                     # ratatui-image: load, cache, render images
+│   ├── highlight.rs                  # syntect integration + syntect→ratatui bridge (leaf module)
+│   ├── images/                       # ratatui-image: load, cache, render images (leaf module)
+│   │   ├── mod.rs                    # ImageManager, protocol management, ASCII art
+│   │   └── tests.rs                  # Image loading unit tests
 │   ├── theme/
 │   │   ├── mod.rs                    # Theme struct, loading, Style conversion
 │   │   ├── dark.json                 # Built-in dark theme
 │   │   ├── light.json                # Built-in light theme
 │   │   └── dracula.json              # Built-in dracula theme
-│   ├── layout.rs                     # Block measurement & vertical space allocation
+│   ├── layout/                       # Layout module
+│   │   ├── mod.rs                    # Block measurement & vertical space allocation
+│   │   └── tests.rs                  # Layout unit tests
+│   ├── math/                         # LaTeX math: Unicode conversion + async pixel rendering (leaf module)
+│   │   ├── mod.rs                    # unicode_math(), MathEngine, render_latex_to_image()
+│   │   └── tests.rs                  # Unit tests for unicode_math, MathEngine, rendering
 │   └── keybindings.rs                # Input handling (vim-style + standard)
 ├── themes/
 │   └── example-custom.json
 ├── testdata/
 │   ├── basic.md
 │   ├── code-blocks.md
+│   ├── font-slots.md
 │   ├── lists.md
 │   ├── blockquotes.md
 │   ├── tables.md
 │   ├── images.md
+│   ├── gradient.png
+│   ├── rust-logo.png
+│   ├── html-images.md
+│   ├── links.md
+│   ├── remote-images.md
+│   ├── math.md
 │   └── full-featured.md
 └── README.md
 ```
@@ -87,6 +115,7 @@ mdink/
 | 4 | `ratatui-image 10`, `image 0.25` |
 | 5 | `serde 1`, `serde_json 1`, `dirs 5` |
 | 6 | *(optional: `ureq 3` for URL fetching)* |
+| Math | `ratex-parser 0.1.2`, `ratex-layout 0.1.2`, `ratex-types 0.1.2`, `ratex-svg 0.1.2` (standalone), `ratex-katex-fonts 0.1.2`, `resvg 0.47` — unconditional (no feature gate) |
 | 7 | `clap_mangen 0.2`, `clap_complete 4`, `flate2 1` (xtask only — not shipped in binary) |
 
 ---
@@ -99,6 +128,8 @@ mdink/
 - **Phase 7 requires `src/cli.rs` from Phase 1:** The xtask imports the `Cli` struct. This is why Phase 1 separates `cli.rs` from `main.rs`.
 - **Recommendation:** Even during Phase 1, define a minimal `Theme` struct with hardcoded values so Phase 5 becomes "extend fields" rather than "thread a new parameter everywhere."
 - **Font slot strategy has two stages:** Stage 1 (modifier changes to `parser.rs` + comment detection in `highlight.rs`) can be applied immediately after Phase 2. Stage 2 (theme-configurable slot assignments + `strong_uses_bold_italic` flag) integrates with Phase 5. See [font_slot_strategy.md](font_slot_strategy.md).
+- **Math rendering builds on Phase 4 (images):** Uses the same `ImageManager` for protocol registration and the same `ImageStart`/`ImageContinuation` layout path. The rendering pipeline (ratex-svg → resvg) is feature-gated behind `math-images`. Terminal background color is detected via OSC 11 at startup and passed through the render pipeline for correct compositing on both dark and light themes. See [feature_math.md](feature_math.md).
+- **File watcher (Feature 10) shares the poll-mode event loop:** Uses `FileWatcher` in `main.rs` that tracks file mtime. Extends the same `event::poll(200ms)` path used by streaming (Feature 4 in [feature_advanced.md](feature_advanced.md)), remote image fetching, and math rendering. Scroll is preserved on reload (clamped to `max_scroll()`). The watcher is updated at all navigation sites (file browser, link follow, back navigation). See [feature_nav.md](feature_nav.md) Feature 10.
 
 ---
 

@@ -10,6 +10,8 @@ use pulldown_cmark::{
 use ratatui::style::Style;
 use ratatui::text::Line;
 
+use crate::images::ImageManager;
+use crate::math::MathEngine;
 use crate::theme::{self, MarkdownTheme};
 
 /// A rendered markdown block ready for layout.
@@ -58,24 +60,68 @@ pub enum RenderedBlock {
     Image {
         /// Index into `ImageManager::protocols` for renderer access.
         protocol_index: usize,
+        /// The image source URL or local file path (for image navigation mode).
+        src_url: String,
         /// Alt text for accessibility / fallback display.
         alt_text: String,
         /// Image width in terminal cell columns.
         width_cells: u16,
         /// Image height in terminal cell rows.
         height_cells: u16,
+        /// Natural pixel width (for resize recalculation via cache).
+        px_width: u32,
+        /// Natural pixel height (for resize recalculation via cache).
+        px_height: u32,
     },
     /// A colored ASCII art rendering of an image (used when no graphics protocol is available).
     AsciiImage {
         /// Pre-rendered colored lines (one Line per row of ASCII art).
         lines: Vec<Line<'static>>,
+        /// The image source URL or local file path (for image navigation mode).
+        src_url: String,
         /// Alt text for accessibility.
         alt_text: String,
     },
     /// An image that could not be loaded (missing file, no graphics support, etc.).
     ImageFallback {
+        /// The image source URL or local file path (for image navigation mode).
+        src_url: String,
         /// Alt text to display in place of the image.
         alt_text: String,
+    },
+    /// A remote image awaiting background fetch.
+    /// Produced during parse for http:// and https:// image URLs.
+    /// The event loop resolves this to Image/AsciiImage/ImageFallback
+    /// once the fetch completes and the result is cached.
+    ImagePending {
+        /// The URL to fetch.
+        url: String,
+        /// Alt text for accessibility / fallback display.
+        alt_text: String,
+    },
+    /// Display math formula rendered as Unicode text (immediate, universal fallback).
+    /// Always produced first. May be replaced by MathImage after async rendering.
+    MathUnicode {
+        /// Styled content (wraps like a Paragraph).
+        content: Vec<StyledSpan>,
+        /// Original LaTeX source (cache key for async rendering).
+        raw_latex: String,
+    },
+    /// Display math formula rendered as a pixel image via terminal graphics protocol.
+    /// Produced after async rendering completes and cache is warm.
+    MathImage {
+        /// Index into `ImageManager::protocols` for renderer access.
+        protocol_index: usize,
+        /// Image width in terminal cell columns.
+        width_cells: u16,
+        /// Image height in terminal cell rows.
+        height_cells: u16,
+        /// Natural pixel width (for resize recalculation via cache).
+        px_width: u32,
+        /// Natural pixel height (for resize recalculation via cache).
+        px_height: u32,
+        /// Original LaTeX source (cache key on resize).
+        raw_latex: String,
     },
 }
 
@@ -100,6 +146,32 @@ pub struct StyledSpan {
     pub style: Style,
     /// Optional hyperlink URL for OSC 8 terminal links.
     pub url: Option<String>,
+    /// Non-empty for inline math spans. Contains the original LaTeX source.
+    /// Used by queue_pending_math_renders() to find inline formulas for async rendering.
+    /// Empty for all non-math spans.
+    pub math_latex: String,
+    /// Inline math image metadata. `Some` when this span represents a rendered
+    /// inline math image (re-parse with warm cache). `None` for all other spans.
+    /// When present, `text` contains NBSP characters as an invisible placeholder.
+    pub math_image: Option<InlineMathImage>,
+}
+
+/// Inline math image metadata attached to a `StyledSpan`.
+///
+/// Present when the math formula has been rendered to a pixel image
+/// (re-parse with warm cache). The span's text is replaced with NBSP
+/// characters whose count equals `width_cells`.
+pub struct InlineMathImage {
+    /// Index into `ImageManager::protocols` for renderer access.
+    pub protocol_index: usize,
+    /// Image width in terminal cell columns.
+    pub width_cells: u16,
+    /// Natural pixel width (for resize recalculation via cache).
+    #[allow(dead_code)]
+    pub px_width: u32,
+    /// Natural pixel height (for resize recalculation via cache).
+    #[allow(dead_code)]
+    pub px_height: u32,
 }
 
 /// A single cell in a GFM table.
@@ -184,6 +256,7 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 struct ParseContext<'a> {
     highlighter: &'a crate::highlight::Highlighter,
     images: &'a mut crate::images::ImageManager,
+    math: &'a mut MathEngine,
     theme: &'a MarkdownTheme,
     blocks: Vec<RenderedBlock>,
     /// Block-level state machine (never empty while parsing).
@@ -207,11 +280,13 @@ impl<'a> ParseContext<'a> {
     fn new(
         highlighter: &'a crate::highlight::Highlighter,
         images: &'a mut crate::images::ImageManager,
+        math: &'a mut MathEngine,
         theme: &'a MarkdownTheme,
     ) -> Self {
         Self {
             highlighter,
             images,
+            math,
             theme,
             blocks: Vec::new(),
             state_stack: vec![ParserState::TopLevel],
@@ -316,47 +391,92 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InImage { dest_url, alt_buffer }) =
                     self.state_stack.pop()
                 {
-                    // Native Image blocks use StatefulProtocol which requires a
-                    // dedicated Rect — they can't render inside table cell spans.
-                    // Force ASCII art when we're inside a table context.
                     let in_table = self
                         .state_stack
                         .iter()
                         .any(|s| matches!(s, ParserState::InTable { .. }));
-
-                    if self.images.images_disabled() {
-                        // User explicitly disabled images via --no-images.
-                        self.emit_block(RenderedBlock::ImageFallback {
-                            alt_text: alt_buffer,
-                        });
-                    } else if in_table
-                        || self.images.prefer_ascii()
-                        || !self.images.has_graphics_support()
-                    {
-                        // Inside table, user forced ASCII art, or no graphics protocol.
-                        self.emit_ascii_or_fallback(&dest_url, alt_buffer);
-                    } else {
-                        // Terminal supports a graphics protocol — try native rendering.
-                        match self.images.load_image(&dest_url) {
-                            Ok((protocol_index, width_cells, height_cells)) => {
-                                self.emit_block(RenderedBlock::Image {
-                                    protocol_index,
-                                    alt_text: alt_buffer,
-                                    width_cells,
-                                    height_cells,
-                                });
-                            }
-                            Err(e) => {
-                                // Native failed — try ASCII art before giving up.
-                                eprintln!("warning: {e}");
-                                self.emit_ascii_or_fallback(&dest_url, alt_buffer);
-                            }
-                        }
-                    }
+                    self.load_and_emit_image(dest_url, alt_buffer, in_table);
                 }
             }
             // Images don't contain block-level content — ignore everything else.
             _ => {}
+        }
+    }
+
+    /// Central image routing: given a URL and alt text, emits the correct
+    /// `RenderedBlock` variant (Image, AsciiImage, ImagePending, ImageFallback).
+    ///
+    /// Shared by both markdown `![](url)` images and HTML `<img>` tags.
+    fn load_and_emit_image(&mut self, dest_url: String, alt_text: String, in_table: bool) {
+        if self.images.images_disabled() {
+            self.emit_block(RenderedBlock::ImageFallback { src_url: dest_url, alt_text });
+        } else if ImageManager::is_remote_url(&dest_url) {
+            if let Some(dyn_img) = self.images.get_cached(&dest_url) {
+                let cloned = dyn_img.clone();
+                self.resolve_cached_remote(&cloned, &dest_url, &alt_text, in_table);
+            } else if !self.images.fetch_remote() {
+                // Remote fetching disabled → immediate fallback.
+                self.emit_block(RenderedBlock::ImageFallback { src_url: dest_url, alt_text });
+            } else if self.images.is_failed_url(&dest_url) {
+                // Previously failed → degrade to fallback (don't re-queue).
+                self.emit_block(RenderedBlock::ImageFallback { src_url: dest_url, alt_text });
+            } else {
+                // Remote fetching enabled → emit pending, queue will send to fetch thread.
+                self.emit_block(RenderedBlock::ImagePending {
+                    url: dest_url,
+                    alt_text,
+                });
+            }
+        } else if in_table
+            || self.images.prefer_ascii()
+            || !self.images.has_graphics_support()
+        {
+            self.emit_ascii_or_fallback(&dest_url, alt_text);
+        } else {
+            match self.images.load_image(&dest_url) {
+                Ok((protocol_index, width_cells, height_cells, px_width, px_height)) => {
+                    self.emit_block(RenderedBlock::Image {
+                        protocol_index,
+                        src_url: dest_url,
+                        alt_text,
+                        width_cells,
+                        height_cells,
+                        px_width,
+                        px_height,
+                    });
+                }
+                Err(_) => {
+                    self.emit_ascii_or_fallback(&dest_url, alt_text);
+                }
+            }
+        }
+    }
+
+    /// Tries to extract an `<img>` tag from raw HTML and emit an image block.
+    ///
+    /// Handles both `Event::Html` (block-level, may contain the entire
+    /// `<div>...</div>`) and `Event::InlineHtml` (self-contained tag).
+    /// Returns true if an `<img>` was found and processed.
+    fn try_handle_html_img(&mut self, html: &str) -> bool {
+        // Find <img (case-insensitive) within the HTML string.
+        let lower = html.to_ascii_lowercase();
+        let Some(img_start) = lower.find("<img") else {
+            return false;
+        };
+        // Extract from the original html (preserving case for URLs).
+        let img_tag = &html[img_start..];
+        let src = extract_attr(img_tag, "src");
+        let alt = extract_attr(img_tag, "alt").unwrap_or_default();
+
+        if let Some(src) = src {
+            let in_table = self
+                .state_stack
+                .iter()
+                .any(|s| matches!(s, ParserState::InTable { .. }));
+            self.load_and_emit_image(src, alt, in_table);
+            true
+        } else {
+            false
         }
     }
 
@@ -381,6 +501,13 @@ impl<'a> ParseContext<'a> {
             Event::End(_) => {
                 self.state_stack.pop();
                 self.state_stack.push(ParserState::Skipping { depth: depth - 1 });
+            }
+            // Check for <img> tags in HTML events even while skipping.
+            Event::Html(html) => {
+                self.try_handle_html_img(&html);
+            }
+            Event::InlineHtml(html) => {
+                self.try_handle_html_img(&html);
             }
             _ => {}
         }
@@ -565,9 +692,17 @@ impl<'a> ParseContext<'a> {
             // ── Ignored ──────────────────────────────────────────────
             // End events for passthrough/skipped tags have no handler.
             Event::End(_) => {}
-            Event::FootnoteReference(_)
-            | Event::InlineHtml(_)
-            | Event::Html(_) => {}
+            Event::FootnoteReference(_) => {}
+            // ── HTML img tags ────────────────────────────────────────
+            // pulldown-cmark emits HTML <img> as InlineHtml/Html rather
+            // than Tag::Image. Extract src/alt and route through the same
+            // image loading pipeline.
+            Event::InlineHtml(html) => {
+                self.try_handle_html_img(&html);
+            }
+            Event::Html(html) => {
+                self.try_handle_html_img(&html);
+            }
         }
     }
 
@@ -603,13 +738,67 @@ impl<'a> ParseContext<'a> {
 
     /// Attempts ASCII art rendering; falls back to `ImageFallback` on error.
     fn emit_ascii_or_fallback(&mut self, dest_url: &str, alt_text: String) {
+        let src_url = dest_url.to_string();
         match self.images.load_ascii_image(dest_url) {
             Ok(lines) => {
-                self.emit_block(RenderedBlock::AsciiImage { lines, alt_text });
+                self.emit_block(RenderedBlock::AsciiImage { lines, src_url, alt_text });
             }
-            Err(e) => {
-                eprintln!("warning: {e}");
-                self.emit_block(RenderedBlock::ImageFallback { alt_text });
+            Err(_) => {
+                self.emit_block(RenderedBlock::ImageFallback { src_url, alt_text });
+            }
+        }
+    }
+
+    /// Resolves a cached remote image into the appropriate block variant.
+    ///
+    /// Follows the same routing as local images: native graphics when available,
+    /// ASCII art in tables or when forced, fallback on error.
+    fn resolve_cached_remote(
+        &mut self,
+        dyn_img: &image::DynamicImage,
+        dest_url: &str,
+        alt_text: &str,
+        in_table: bool,
+    ) {
+        let in_table_or_ascii = in_table
+            || self.images.prefer_ascii()
+            || !self.images.has_graphics_support();
+
+        if in_table_or_ascii {
+            match self.images.load_ascii_image_from_memory(dyn_img) {
+                Ok(lines) => {
+                    self.emit_block(RenderedBlock::AsciiImage {
+                        lines,
+                        src_url: dest_url.to_string(),
+                        alt_text: alt_text.to_string(),
+                    });
+                }
+                Err(_) => {
+                    self.emit_block(RenderedBlock::ImageFallback {
+                        src_url: dest_url.to_string(),
+                        alt_text: alt_text.to_string(),
+                    });
+                }
+            }
+        } else {
+            match self.images.load_image_from_memory(dyn_img.clone()) {
+                Ok((protocol_index, width_cells, height_cells, px_width, px_height)) => {
+                    self.emit_block(RenderedBlock::Image {
+                        protocol_index,
+                        src_url: dest_url.to_string(),
+                        alt_text: alt_text.to_string(),
+                        width_cells,
+                        height_cells,
+                        px_width,
+                        px_height,
+                    });
+                }
+                Err(_) => {
+                    self.emit_block(RenderedBlock::ImageFallback {
+                        src_url: dest_url.to_string(),
+                        alt_text: alt_text.to_string(),
+                    });
+                }
             }
         }
     }
@@ -689,6 +878,8 @@ impl<'a> ParseContext<'a> {
                         text: " ".to_string(),
                         style: Style::default(),
                         url: None,
+                        math_latex: String::new(),
+                        math_image: None,
                     });
                 }
             }
@@ -832,266 +1023,134 @@ impl<'a> ParseContext<'a> {
     fn push_text(&mut self, text: &str) {
         let style = effective_style(&self.style_stack);
         let url = self.current_link_url.clone();
-        self.current_spans.push(StyledSpan { text: text.to_string(), style, url });
+        self.current_spans.push(StyledSpan { text: text.to_string(), style, url, math_latex: String::new(), math_image: None });
     }
 
     fn push_inline_code(&mut self, text: &str) {
         let url = self.current_link_url.clone();
         self.current_spans
-            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline), url });
+            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline), url, math_latex: String::new(), math_image: None });
     }
 
     fn push_soft_break(&mut self) {
         let style = effective_style(&self.style_stack);
-        self.current_spans.push(StyledSpan { text: " ".to_string(), style, url: None });
+        self.current_spans.push(StyledSpan { text: " ".to_string(), style, url: None, math_latex: String::new(), math_image: None });
     }
 
     fn push_hard_break(&mut self) {
         let style = effective_style(&self.style_stack);
-        self.current_spans.push(StyledSpan { text: "\n".to_string(), style, url: None });
+        self.current_spans.push(StyledSpan { text: "\n".to_string(), style, url: None, math_latex: String::new(), math_image: None });
     }
 
     // ── Math handlers ───────────────────────────────────────────────────────
 
     fn push_inline_math(&mut self, text: &str) {
+        let raw_latex = text.to_string();
         let style = theme::inline_style(&self.theme.math_inline);
-        let converted = unicode_math(text);
+
+        // Check cache for previously rendered image (only when pixel rendering is enabled).
+        if self.math.enabled() {
+        if let Some(dyn_img) = self.math.get_cached(&raw_latex) {
+            let dyn_img = dyn_img.clone();
+            match self.images.load_image_from_memory(dyn_img) {
+                Ok((idx, w, _h, pw, ph)) => {
+                    // Inline: keep as span within the current paragraph, NOT a standalone block.
+                    // Use NBSP characters as placeholder — textwrap treats NBSP as non-breaking,
+                    // so the placeholder stays together as one unit during word wrapping.
+                    let w = w.max(1);
+                    self.current_spans.push(StyledSpan {
+                        text: "\u{00A0}".repeat(w as usize),
+                        style,
+                        url: None,
+                        math_latex: raw_latex,
+                        math_image: Some(InlineMathImage {
+                            protocol_index: idx,
+                            width_cells: w,
+                            px_width: pw,
+                            px_height: ph,
+                        }),
+                    });
+                    return;
+                }
+                Err(_) => { /* fall through to Unicode approximation */ }
+            }
+        }
+        } // end math.enabled() guard
+
+        // Unicode approximation (immediate display, or image load failed).
+        let converted = crate::math::unicode_math(text);
         self.current_spans.push(StyledSpan {
             text: format!("${converted}$"),
             style,
             url: None,
+            math_latex: raw_latex,
+            math_image: None,
         });
     }
 
     fn push_display_math(&mut self, text: &str) {
+        let raw_latex = text.to_string();
         let style = theme::inline_style(&self.theme.math_display);
-        let converted = unicode_math(text);
+
+        // Check cache for previously rendered image (only when pixel rendering is enabled).
+        if self.math.enabled() {
+        if let Some(dyn_img) = self.math.get_cached(&raw_latex) {
+            let dyn_img = dyn_img.clone();
+            match self.images.load_image_from_memory(dyn_img) {
+                Ok((idx, w, h, pw, ph)) => {
+                    self.emit_block(RenderedBlock::MathImage {
+                        protocol_index: idx,
+                        width_cells: w,
+                        height_cells: h,
+                        px_width: pw,
+                        px_height: ph,
+                        raw_latex,
+                    });
+                    return;
+                }
+                Err(_) => { /* fall through to Unicode */ }
+            }
+        }
+        } // end math.enabled() guard
+
+        // Unicode approximation (immediate display).
+        let converted = crate::math::unicode_math(text);
         let content = vec![StyledSpan {
             text: format!("$${converted}$$"),
             style,
             url: None,
+            math_latex: String::new(), // display math tracked via block, not span
+            math_image: None,
         }];
-        self.emit_block(RenderedBlock::Paragraph { content });
+        self.emit_block(RenderedBlock::MathUnicode { content, raw_latex });
     }
-}
-
-// ── LaTeX-to-Unicode conversion ──────────────────────────────────────────────
-
-/// Best-effort conversion of LaTeX math commands to Unicode characters.
-///
-/// Handles Greek letters, common operators, arrows, and limited
-/// superscript/subscript notation. Unrecognized commands pass through as-is.
-fn unicode_math(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            // Collect the command name (alphabetic characters after \).
-            let mut cmd = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_alphabetic() {
-                    cmd.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if cmd.is_empty() {
-                // Escaped non-alpha character (e.g. \{ \} \#): pass through.
-                if let Some(&next) = chars.peek() {
-                    result.push(next);
-                    chars.next();
-                } else {
-                    result.push('\\');
-                }
-            } else if let Some(replacement) = latex_command_to_unicode(&cmd) {
-                result.push_str(replacement);
-            } else {
-                // Unrecognized command: pass through as-is.
-                result.push('\\');
-                result.push_str(&cmd);
-            }
-        } else if ch == '^' {
-            // Superscript: ^{...} or ^x
-            let content = collect_braced_or_single(&mut chars);
-            for c in content.chars() {
-                result.push(superscript_char(c));
-            }
-        } else if ch == '_' {
-            // Subscript: _{...} or _x
-            let content = collect_braced_or_single(&mut chars);
-            for c in content.chars() {
-                result.push(subscript_char(c));
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
-}
-
-/// Collects content from `{...}` braces or a single character.
-fn collect_braced_or_single(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
-    if chars.peek() == Some(&'{') {
-        chars.next(); // consume '{'
-        let mut content = String::new();
-        let mut depth = 1u32;
-        for c in chars.by_ref() {
-            if c == '{' {
-                depth += 1;
-                content.push(c);
-            } else if c == '}' {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-                content.push(c);
-            } else {
-                content.push(c);
-            }
-        }
-        content
-    } else if let Some(&c) = chars.peek() {
-        chars.next();
-        c.to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Maps a character to its Unicode superscript equivalent, if one exists.
-/// Falls back to the original character for unmapped codepoints.
-fn superscript_char(c: char) -> char {
-    match c {
-        '0' => '\u{2070}', '1' => '\u{00B9}', '2' => '\u{00B2}', '3' => '\u{00B3}',
-        '4' => '\u{2074}', '5' => '\u{2075}', '6' => '\u{2076}', '7' => '\u{2077}',
-        '8' => '\u{2078}', '9' => '\u{2079}', '+' => '\u{207A}', '-' => '\u{207B}',
-        '=' => '\u{207C}', '(' => '\u{207D}', ')' => '\u{207E}', 'n' => '\u{207F}',
-        'i' => '\u{2071}', _ => c,
-    }
-}
-
-/// Maps a character to its Unicode subscript equivalent, if one exists.
-/// Falls back to the original character for unmapped codepoints.
-fn subscript_char(c: char) -> char {
-    match c {
-        '0' => '\u{2080}', '1' => '\u{2081}', '2' => '\u{2082}', '3' => '\u{2083}',
-        '4' => '\u{2084}', '5' => '\u{2085}', '6' => '\u{2086}', '7' => '\u{2087}',
-        '8' => '\u{2088}', '9' => '\u{2089}', '+' => '\u{208A}', '-' => '\u{208B}',
-        '=' => '\u{208C}', '(' => '\u{208D}', ')' => '\u{208E}',
-        'a' => '\u{2090}', 'e' => '\u{2091}', 'o' => '\u{2092}', 'x' => '\u{2093}',
-        'h' => '\u{2095}', 'k' => '\u{2096}', 'l' => '\u{2097}', 'm' => '\u{2098}',
-        'n' => '\u{2099}', 'p' => '\u{209A}', 's' => '\u{209B}', 't' => '\u{209C}',
-        _ => c,
-    }
-}
-
-/// Maps a LaTeX command name to its Unicode replacement.
-fn latex_command_to_unicode(cmd: &str) -> Option<&'static str> {
-    Some(match cmd {
-        // Greek lowercase
-        "alpha" => "\u{03B1}",
-        "beta" => "\u{03B2}",
-        "gamma" => "\u{03B3}",
-        "delta" => "\u{03B4}",
-        "epsilon" => "\u{03B5}",
-        "zeta" => "\u{03B6}",
-        "eta" => "\u{03B7}",
-        "theta" => "\u{03B8}",
-        "iota" => "\u{03B9}",
-        "kappa" => "\u{03BA}",
-        "lambda" => "\u{03BB}",
-        "mu" => "\u{03BC}",
-        "nu" => "\u{03BD}",
-        "xi" => "\u{03BE}",
-        "pi" => "\u{03C0}",
-        "rho" => "\u{03C1}",
-        "sigma" => "\u{03C3}",
-        "tau" => "\u{03C4}",
-        "upsilon" => "\u{03C5}",
-        "phi" => "\u{03C6}",
-        "chi" => "\u{03C7}",
-        "psi" => "\u{03C8}",
-        "omega" => "\u{03C9}",
-        // Greek uppercase
-        "Gamma" => "\u{0393}",
-        "Delta" => "\u{0394}",
-        "Theta" => "\u{0398}",
-        "Lambda" => "\u{039B}",
-        "Xi" => "\u{039E}",
-        "Pi" => "\u{03A0}",
-        "Sigma" => "\u{03A3}",
-        "Phi" => "\u{03A6}",
-        "Psi" => "\u{03A8}",
-        "Omega" => "\u{03A9}",
-        // Operators
-        "times" => "\u{00D7}",
-        "div" => "\u{00F7}",
-        "pm" => "\u{00B1}",
-        "mp" => "\u{2213}",
-        "cdot" => "\u{00B7}",
-        "leq" | "le" => "\u{2264}",
-        "geq" | "ge" => "\u{2265}",
-        "neq" | "ne" => "\u{2260}",
-        "approx" => "\u{2248}",
-        "equiv" => "\u{2261}",
-        "subset" => "\u{2282}",
-        "supset" => "\u{2283}",
-        "subseteq" => "\u{2286}",
-        "supseteq" => "\u{2287}",
-        "in" => "\u{2208}",
-        "notin" => "\u{2209}",
-        "cup" => "\u{222A}",
-        "cap" => "\u{2229}",
-        "land" | "wedge" => "\u{2227}",
-        "lor" | "vee" => "\u{2228}",
-        "neg" | "lnot" => "\u{00AC}",
-        "forall" => "\u{2200}",
-        "exists" => "\u{2203}",
-        "nabla" => "\u{2207}",
-        "partial" => "\u{2202}",
-        "infty" => "\u{221E}",
-        "emptyset" => "\u{2205}",
-        // Big operators
-        "sum" => "\u{03A3}",
-        "prod" => "\u{03A0}",
-        "int" => "\u{222B}",
-        "iint" => "\u{222C}",
-        "iiint" => "\u{222D}",
-        "oint" => "\u{222E}",
-        "sqrt" => "\u{221A}",
-        // Arrows
-        "to" | "rightarrow" => "\u{2192}",
-        "leftarrow" => "\u{2190}",
-        "leftrightarrow" => "\u{2194}",
-        "Rightarrow" => "\u{21D2}",
-        "Leftarrow" => "\u{21D0}",
-        "Leftrightarrow" | "iff" => "\u{21D4}",
-        "uparrow" => "\u{2191}",
-        "downarrow" => "\u{2193}",
-        "mapsto" => "\u{21A6}",
-        // Miscellaneous
-        "ldots" | "dots" | "cdots" => "\u{2026}",
-        "prime" => "\u{2032}",
-        "circ" => "\u{2218}",
-        "bullet" => "\u{2022}",
-        "star" => "\u{22C6}",
-        "dagger" => "\u{2020}",
-        "ddagger" => "\u{2021}",
-        // Spacing commands: collapse to a space.
-        "quad" | "qquad" => " ",
-        // Formatting wrappers: drop the command, content follows in braces.
-        "text" | "mathrm" | "mathbf" | "mathit" | "mathsf" | "mathtt"
-        | "textbf" | "textit" | "textrm" => "",
-        "frac" => "/",
-        "left" | "right" | "bigl" | "bigr" | "Big" | "big" => "",
-        _ => return None,
-    })
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+/// Extracts the value of an HTML attribute from a tag string.
+///
+/// Handles double-quoted, single-quoted, and unquoted attribute values.
+/// Returns `None` if the attribute is not found.
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=", attr);
+    let lower = tag.to_ascii_lowercase();
+    let pos = lower.find(&pattern)?;
+    let rest = &tag[pos + pattern.len()..];
+
+    let first = rest.chars().next()?;
+    if first == '"' || first == '\'' {
+        // Quoted value: find closing quote.
+        let start = first.len_utf8();
+        rest[start..].find(first).map(|end| rest[start..start + end].to_string())
+    } else {
+        // Unquoted value: ends at whitespace or `>`.
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
+}
 
 /// Parses a markdown source string into the RenderedBlock IR.
 ///
@@ -1099,13 +1158,206 @@ fn latex_command_to_unicode(cmd: &str) -> Option<&'static str> {
 /// user markdown containing these features doesn't break.
 /// Images are loaded via `images` during parsing; if loading fails
 /// they degrade to `ImageFallback` blocks.
+/// Pre-processes markdown source to normalize math delimiters.
+///
+/// pulldown-cmark's math extension (following the GFM spec) requires that the
+/// opening `$` is immediately followed by a non-whitespace character and the
+/// closing `$` is immediately preceded by a non-whitespace character. Some
+/// markdown authors write `$ \hat{p}_i$` with a space after `$`, which prevents
+/// pulldown-cmark from recognizing it as math.
+///
+/// This function strips leading whitespace after `$`/`$$` and trailing whitespace
+/// before the matching closing delimiter, so that pulldown-cmark can parse the
+/// math expression correctly.
+///
+/// Guards against false positives:
+/// - Fenced code blocks (`` ``` ``) and inline code (`` ` ``) are left untouched.
+/// - The content between delimiters must not contain unescaped `$` (prevents
+///   matching the wrong pair when `$` appears in prose like `$5, not $10`).
+/// - The closing `$` must be preceded by non-whitespace and not followed by a digit.
+///
+/// Returns true if `s` looks like a LaTeX math expression rather than prose.
+/// Used as a guard when the closing `$` is preceded by whitespace — we only
+/// accept such a match when the content is clearly math.
+fn looks_like_math(s: &str) -> bool {
+    s.contains('\\') // LaTeX command: \hat, \frac, etc.
+        || s.contains('^') // superscript
+        || s.contains('_') && s.contains('{') // subscript with braces
+        || s.contains('\\') // (belt-and-suspenders)
+}
+
+fn normalize_math_delimiters(src: &str) -> String {
+    let mut result = String::with_capacity(src.len());
+    let mut in_code_fence = false;
+    let mut i = 0;
+    let b = src.as_bytes();
+    let len = src.len();
+
+    while i < len {
+        // ── Fenced code blocks ───────────────────────────────────────────
+        if !in_code_fence && b[i] == b'`' && src[i..].starts_with("```") {
+            in_code_fence = true;
+            let end = src[i..].find('\n').map_or(len - i, |p| p + 1);
+            result.push_str(&src[i..i + end]);
+            i += end;
+            continue;
+        }
+        if in_code_fence {
+            if b[i] == b'`' && src[i..].starts_with("```") {
+                in_code_fence = false;
+                let end = src[i..].find('\n').map_or(len - i, |p| p + 1);
+                result.push_str(&src[i..i + end]);
+                i += end;
+            } else {
+                // Safe: loop invariant guarantees i < len, so chars() is non-empty.
+                let ch = src[i..].chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        // ── Inline code ──────────────────────────────────────────────────
+        if b[i] == b'`' {
+            let mut j = i + 1;
+            while j < len && b[j] != b'`' {
+                j += 1;
+            }
+            if j < len {
+                j += 1;
+            }
+            result.push_str(&src[i..j]);
+            i = j;
+            continue;
+        }
+
+        // ── Escaped dollar ───────────────────────────────────────────────
+        if b[i] == b'\\' && i + 1 < len && b[i + 1] == b'$' {
+            result.push_str("\\$");
+            i += 2;
+            continue;
+        }
+
+        // ── Dollar sign ──────────────────────────────────────────────────
+        if b[i] == b'$' {
+            // Display math: $$...$$
+            if i + 1 < len && b[i + 1] == b'$' {
+                let after_open = i + 2;
+                let content_start = src[after_open..]
+                    .find(|c: char| !c.is_whitespace())
+                    .map_or(after_open, |p| after_open + p);
+
+                // Find closing $$
+                if let Some(rel) = src[content_start..].find("$$") {
+                    let close = content_start + rel;
+                    let content = src[content_start..close].trim_end();
+                    // Content must not contain unescaped $ (avoids matching wrong pair).
+                    if !content.contains('$') {
+                        result.push_str("$$");
+                        result.push_str(content);
+                        result.push_str("$$");
+                        i = close + 2;
+                        continue;
+                    }
+                }
+                // No valid closing $$ or content contains $, output as-is.
+                result.push_str("$$");
+                i += 2;
+                continue;
+            }
+
+            // Inline math: $...$ — only pre-process when followed by whitespace.
+            if i + 1 < len && (b[i + 1] as char).is_whitespace() {
+                let after_open = i + 1;
+                let content_start = src[after_open..]
+                    .find(|c: char| !c.is_whitespace())
+                    .map_or(after_open, |p| after_open + p);
+
+                // Find closing $ on the same line (inline math must not span lines).
+                let line_end = src[content_start..]
+                    .find('\n')
+                    .map_or(len, |p| content_start + p);
+                let search = &src[content_start..line_end];
+
+                // Collect all candidate closing $ positions (not $$, not followed by digit).
+                let mut candidates: Vec<usize> = Vec::new();
+                let mut j = 0;
+                while j < search.len() {
+                    if search.as_bytes()[j] == b'$' {
+                        if j + 1 < search.len() && search.as_bytes()[j + 1] == b'$' {
+                            j += 2;
+                            continue;
+                        }
+                        let next_byte_pos = content_start + j + 1;
+                        if next_byte_pos < len {
+                            // Safe: next_byte_pos < len, so chars() is non-empty.
+                            let next_ch = src[next_byte_pos..].chars().next().unwrap();
+                            if next_ch.is_ascii_digit() {
+                                j += 1;
+                                continue;
+                            }
+                        }
+                        candidates.push(j);
+                    }
+                    j += 1;
+                }
+
+                // Try candidates in order.  Prefer $ preceded by non-whitespace;
+                // fall back to $ preceded by whitespace only if the trimmed content
+                // looks like math (contains LaTeX commands or operators).
+                let mut matched = false;
+                for &rel_close in &candidates {
+                    let close = content_start + rel_close;
+                    let content = src[content_start..close].trim_end();
+                    if content.contains('$') || content.is_empty() {
+                        continue;
+                    }
+                    // Safe: rel_close > 0 guarantees at least one char before position.
+                    let preceded_by_ws = rel_close > 0
+                        && src[content_start + rel_close - 1..].chars().next().unwrap().is_whitespace();
+                    if preceded_by_ws && !looks_like_math(content) {
+                        continue;
+                    }
+                    result.push('$');
+                    result.push_str(content);
+                    result.push('$');
+                    i = close + 1;
+                    matched = true;
+                    break;
+                }
+                if matched {
+                    continue;
+                }
+                // No valid closing $ found, output opening $ as-is.
+                result.push('$');
+                i += 1;
+                continue;
+            }
+
+            // $ not followed by whitespace — already fine, copy as-is.
+            result.push('$');
+            i += 1;
+            continue;
+        }
+
+        // Safe: loop invariant guarantees i < len, so chars() is non-empty.
+        let ch = src[i..].chars().next().unwrap();
+        result.push(ch);
+        i += ch.len_utf8();
+    }
+
+    result
+}
+
 pub fn parse(
     source: &str,
     highlighter: &crate::highlight::Highlighter,
     images: &mut crate::images::ImageManager,
+    math: &mut MathEngine,
     theme: &MarkdownTheme,
 ) -> Vec<RenderedBlock> {
-    ParseContext::new(highlighter, images, theme).process(source)
+    let source = normalize_math_delimiters(source);
+    ParseContext::new(highlighter, images, math, theme).process(&source)
 }
 
 /// Allows `ParserState` to be used in debug_assert messages.

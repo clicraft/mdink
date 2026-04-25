@@ -59,13 +59,19 @@ const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
 /// — matching WezTerm's built-in default font exactly.
 pub fn detect_and_resolve(pdf_font: Option<&str>) -> Option<ResolvedFonts> {
     let fonts = match pdf_font {
-        Some(family) => TerminalFonts {
-            normal: family.to_string(),
-            bold: Some(family.to_string()),
-            italic: Some(family.to_string()),
-            bold_italic: Some(family.to_string()),
-        },
-        None => detect_terminal_font().unwrap_or_else(default_fonts),
+        Some(family) => {
+            log::info!("using PDF font override: {family}");
+            TerminalFonts {
+                normal: family.to_string(),
+                bold: Some(family.to_string()),
+                italic: Some(family.to_string()),
+                bold_italic: Some(family.to_string()),
+            }
+        }
+        None => detect_terminal_font().unwrap_or_else(|| {
+            log::info!("using default font: {DEFAULT_FONT_FAMILY}");
+            default_fonts()
+        }),
     };
     resolve_font_family(&fonts)
 }
