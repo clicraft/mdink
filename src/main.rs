@@ -236,7 +236,12 @@ fn main() -> color_eyre::Result<()> {
         match pdf::export_pdf(&pdf_doc.lines, &pdf_path, resolved.as_ref()) {
             Ok(()) => {
                 eprintln!("Exported: {}", pdf_path.display());
-                let _ = open_with_system_viewer(&pdf_path);
+                // Only launch an external viewer when explicitly requested:
+                // auto-opening crosses a trust boundary (spawns a desktop
+                // handler / explorer.exe) and must be opt-in.
+                if cli.open {
+                    let _ = open_with_system_viewer(&pdf_path);
+                }
             }
             Err(e) => {
                 eprintln!("PDF error: {e}");

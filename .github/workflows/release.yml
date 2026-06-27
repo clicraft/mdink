@@ -147,6 +147,39 @@ jobs:
       - name: List assets
         run: ls -lh dist/
 
+      # Checksums let install.sh verify downloads (fail-closed against tampered
+      # or MITM'd release assets). Filenames in SHA256SUMS are bare (no path)
+      # because we hash from inside dist/, which is what the installer expects.
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip *.deb > SHA256SUMS
+          cat SHA256SUMS
+
+      # Sign SHA256SUMS with minisign so install.sh can verify release
+      # authenticity against its pinned public key. The secret key lives in the
+      # MINISIGN_SECRET_KEY repo secret; MINISIGN_PASSWORD may be empty if the
+      # key was generated passwordless (`minisign -G -W`). Produces
+      # SHA256SUMS.minisig. Fails the release if the signing secret is missing.
+      - name: Sign SHA256SUMS (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "error: MINISIGN_SECRET_KEY secret is not set — cannot sign release" >&2
+            exit 1
+          fi
+          sudo apt-get update -q && sudo apt-get install -y minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          printf '%s' "$MINISIGN_PASSWORD" | minisign -S \
+            -s "$RUNNER_TEMP/minisign.key" \
+            -m dist/SHA256SUMS \
+            -t "mdink ${GITHUB_REF_NAME} checksums"
+          rm -f "$RUNNER_TEMP/minisign.key"
+          cat dist/SHA256SUMS.minisig
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -156,3 +189,5 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.deb
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig

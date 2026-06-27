@@ -91,4 +91,10 @@ pub struct Cli {
     /// Export to PDF and exit (no TUI). Output path defaults to <input>.pdf.
     #[arg(long)]
     pub pdf: bool,
+
+    /// After `--pdf` export, open the file in the system viewer
+    /// (xdg-open / open / explorer.exe). Off by default: export never launches
+    /// an external application unless this flag is given.
+    #[arg(long, requires = "pdf")]
+    pub open: bool,
 }

@@ -9,6 +9,7 @@ use pulldown_cmark::{
 };
 use ratatui::style::Style;
 use ratatui::text::Line;
+use std::borrow::Cow;
 
 use crate::theme::{self, MarkdownTheme};
 
@@ -269,7 +270,7 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InCodeBlock { buffer, .. }) =
                     self.state_stack.last_mut()
                 {
-                    buffer.push_str(&text);
+                    buffer.push_str(&sanitize_text(&text));
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -309,7 +310,7 @@ impl<'a> ParseContext<'a> {
                 if let Some(ParserState::InImage { alt_buffer, .. }) =
                     self.state_stack.last_mut()
                 {
-                    alt_buffer.push_str(&text);
+                    alt_buffer.push_str(&sanitize_text(&text));
                 }
             }
             Event::End(TagEnd::Image) => {
@@ -832,13 +833,13 @@ impl<'a> ParseContext<'a> {
     fn push_text(&mut self, text: &str) {
         let style = effective_style(&self.style_stack);
         let url = self.current_link_url.clone();
-        self.current_spans.push(StyledSpan { text: text.to_string(), style, url });
+        self.current_spans.push(StyledSpan { text: sanitize_text(text).into_owned(), style, url });
     }
 
     fn push_inline_code(&mut self, text: &str) {
         let url = self.current_link_url.clone();
         self.current_spans
-            .push(StyledSpan { text: text.to_string(), style: theme::inline_style(&self.theme.code_inline), url });
+            .push(StyledSpan { text: sanitize_text(text).into_owned(), style: theme::inline_style(&self.theme.code_inline), url });
     }
 
     fn push_soft_break(&mut self) {
@@ -855,7 +856,7 @@ impl<'a> ParseContext<'a> {
 
     fn push_inline_math(&mut self, text: &str) {
         let style = theme::inline_style(&self.theme.math_inline);
-        let converted = unicode_math(text);
+        let converted = sanitize_text(&unicode_math(text)).into_owned();
         self.current_spans.push(StyledSpan {
             text: format!("${converted}$"),
             style,
@@ -865,7 +866,7 @@ impl<'a> ParseContext<'a> {
 
     fn push_display_math(&mut self, text: &str) {
         let style = theme::inline_style(&self.theme.math_display);
-        let converted = unicode_math(text);
+        let converted = sanitize_text(&unicode_math(text)).into_owned();
         let content = vec![StyledSpan {
             text: format!("$${converted}$$"),
             style,
@@ -873,6 +874,31 @@ impl<'a> ParseContext<'a> {
         }];
         self.emit_block(RenderedBlock::Paragraph { content });
     }
+}
+
+/// Strips terminal-dangerous control characters from untrusted document text.
+///
+/// Markdown content is attacker-controlled (local file, stdin, or fetched URL).
+/// Raw C0 control bytes — most importantly ESC (0x1B) — survive UTF-8 decoding
+/// and, in `--print` mode, are written verbatim to the terminal (see
+/// `print_styled_line` in `main.rs`), enabling terminal escape-sequence
+/// injection: window-title/clipboard (OSC 52)/screen manipulation and, on
+/// permissive terminals, answerback-driven command execution.
+///
+/// Removes every Unicode control character (C0, DEL, C1) EXCEPT the two the
+/// pipeline depends on structurally: TAB (code indentation) and LF (breaks).
+/// Returns `Cow::Borrowed` when the input is already clean (the common case),
+/// so well-formed documents pay only a scan, not an allocation.
+fn sanitize_text(s: &str) -> Cow<'_, str> {
+    let needs_filter = s.chars().any(|c| c.is_control() && c != '\t' && c != '\n');
+    if !needs_filter {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .filter(|&c| !c.is_control() || c == '\t' || c == '\n')
+            .collect(),
+    )
 }
 
 // ── LaTeX-to-Unicode conversion ──────────────────────────────────────────────

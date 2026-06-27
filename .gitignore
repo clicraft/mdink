@@ -15,3 +15,13 @@ assets/completions/
 # OS files
 .DS_Store
 Thumbs.db
+
+# ── Local security material — NEVER commit ──────────────────────────
+# minisign keys: the secret signs releases (keep it offline); the public key
+# is pinned into install.sh instead of shipping the file itself.
+minisign.key
+minisign.pub
+*.minisig
+# Local-only security tooling: signing setup script and PoC corpus.
+# Nothing under security/ belongs in the public repo.
+/security/

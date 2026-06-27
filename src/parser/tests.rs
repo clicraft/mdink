@@ -1518,3 +1518,47 @@
         let source = include_str!("../../testdata/math.md");
         let _ = parse(source, h());
     }
+
+    /// Security: untrusted markdown content carrying raw terminal control bytes
+    /// (ESC/BEL) must never survive into the IR. In `--print` mode these reach
+    /// the terminal verbatim, enabling escape-sequence injection (title spoof,
+    /// OSC 52 clipboard write, scrollback rewrite). Covers every ingestion
+    /// chokepoint: body text, inline code, fenced code, image alt text, math.
+    /// Structural whitespace (TAB/LF) inside code must be preserved.
+    #[test]
+    fn test_control_chars_stripped_from_all_content() {
+        let src = "para \x1b]0;PWN\x07 x\n\n\
+                   `co\x1bde`\n\n\
+                   ```bash\n\tkept\x1btab\n```\n\n\
+                   ![a\x1blt](missing.png)\n\n\
+                   The $a\x1b]0;m\x07 = b$ holds.\n";
+        let blocks = parse(src, h());
+
+        // Collect every piece of rendered text the payloads can reach.
+        let mut all = String::new();
+        for b in &blocks {
+            match b {
+                RenderedBlock::Heading { content, .. }
+                | RenderedBlock::Paragraph { content } => {
+                    for s in content {
+                        all.push_str(&s.text);
+                    }
+                }
+                RenderedBlock::CodeBlock { highlighted_lines, .. } => {
+                    for line in highlighted_lines {
+                        for span in &line.spans {
+                            all.push_str(&span.content);
+                        }
+                    }
+                }
+                RenderedBlock::ImageFallback { alt_text }
+                | RenderedBlock::AsciiImage { alt_text, .. } => all.push_str(alt_text),
+                _ => {}
+            }
+        }
+
+        assert!(!all.contains('\u{1b}'), "ESC leaked into IR: {all:?}");
+        assert!(!all.contains('\u{7}'), "BEL leaked into IR: {all:?}");
+        // The fenced code block's leading TAB must be retained.
+        assert!(all.contains('\t'), "TAB in fenced code must be preserved: {all:?}");
+    }
