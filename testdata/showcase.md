@@ -40,4 +40,4 @@ cargo install mdink
 ```
 
 > *Built with Rust on ratatui. MIT licensed.*
-> *Star it → github.com/mdink-rs/mdink*
+> *Star it → github.com/clicraft/mdink*

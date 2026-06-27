@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install mdink — terminal markdown renderer
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mdink-rs/mdink/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/clicraft/mdink/main/install.sh | bash
 #   VERSION=v0.2.0 bash install.sh          # pin a version
 #   BIN_DIR=$HOME/.local/bin bash install.sh # install for current user only
 
 set -euo pipefail
 
-REPO="mdink-rs/mdink"
+REPO="clicraft/mdink"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 
 # ── Detect OS and architecture ────────────────────────────────────────

@@ -8,10 +8,10 @@ pkgver=VERSION_PLACEHOLDER
 pkgrel=1
 pkgdesc="Terminal markdown renderer with syntax highlighting and image support"
 arch=('x86_64' 'aarch64')
-url="https://github.com/mdink-rs/mdink"
+url="https://github.com/clicraft/mdink"
 license=('MIT')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/mdink-rs/mdink/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/clicraft/mdink/archive/v$pkgver.tar.gz")
 sha256sums=('SHA256_PLACEHOLDER')
 
 prepare() {

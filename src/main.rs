@@ -18,6 +18,7 @@ mod theme;
 
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -443,21 +444,167 @@ fn ratatui_to_crossterm_color(color: ratatui::style::Color) -> Option<CtColor> {
     }
 }
 
+/// Maximum number of HTTP redirects to follow when fetching a URL source.
+const MAX_REDIRECTS: usize = 8;
+
+/// SSRF guard: returns `true` if `ip` is NOT a publicly-routable address and
+/// must be refused.
+///
+/// Blocks loopback, private (RFC 1918), link-local (incl. the cloud metadata
+/// endpoint 169.254.169.254), CGNAT/shared (100.64/10), benchmarking, reserved,
+/// multicast/broadcast, and the IPv6 equivalents (ULA fc00::/7, link-local
+/// fe80::/10, and IPv4-mapped forms of all the above).
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64.0.0/10 CGNAT
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))  // 198.18.0.0/15 benchmarking
+                || o[0] >= 240 // 240.0.0.0/4 reserved
+        }
+        IpAddr::V6(v6) => {
+            // Unwrap IPv4-mapped (::ffff:a.b.c.d) and re-check as IPv4 so an
+            // attacker can't smuggle a private v4 address through a v6 literal.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local unicast
+        }
+    }
+}
+
+/// Validates that a URL is http/https and resolves only to public addresses.
+///
+/// Resolves the host and rejects if *any* resolved address is non-public
+/// (conservative against DNS records that mix public and internal IPs).
+fn validate_public_url(url: &str) -> Result<(), String> {
+    let uri: ureq::http::Uri = url.parse().map_err(|_| "invalid URL".to_string())?;
+    match uri.scheme_str() {
+        Some("http") | Some("https") => {}
+        _ => return Err("only http/https URLs are allowed".to_string()),
+    }
+    let host = uri.host().ok_or_else(|| "URL has no host".to_string())?;
+    // `http::Uri::host()` keeps brackets on IPv6 literals; strip for resolution.
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+
+    let addrs: Vec<std::net::SocketAddr> = (host_clean, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve host: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err("host did not resolve to any address".to_string());
+    }
+    for addr in addrs {
+        if is_blocked_ip(addr.ip()) {
+            return Err(format!("resolves to non-public address {}", addr.ip()));
+        }
+    }
+    Ok(())
+}
+
+/// Resolves a redirect `Location` against the current URL.
+///
+/// Absolute targets are returned as-is (scheme re-validated by the caller).
+/// Root-relative (`/path`) targets are rebuilt from the base scheme+authority.
+/// Other relative forms are rejected (fail closed) rather than guessed.
+fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
+    let loc: ureq::http::Uri = location
+        .parse()
+        .map_err(|_| format!("invalid redirect target '{location}'"))?;
+    if loc.scheme_str().is_some() {
+        return Ok(location.to_string());
+    }
+    if !location.starts_with('/') {
+        return Err(format!("unsupported relative redirect '{location}'"));
+    }
+    let base_uri: ureq::http::Uri = base.parse().map_err(|_| "invalid base URL".to_string())?;
+    let scheme = base_uri
+        .scheme_str()
+        .ok_or_else(|| "base URL missing scheme".to_string())?;
+    let authority = base_uri
+        .authority()
+        .ok_or_else(|| "base URL missing host".to_string())?;
+    Ok(format!("{scheme}://{authority}{location}"))
+}
+
 /// Fetches markdown content from a remote URL.
 ///
-/// Applies the same size guard as local files. Errors are printed to stderr
-/// and the process exits with the appropriate BSD-style exit code.
+/// SSRF-guarded: validates that the host (and every redirect hop) resolves only
+/// to public addresses before connecting. Redirects are followed manually with
+/// `max_redirects(0)` so each hop is re-validated. Applies the same size guard
+/// as local files. Errors are printed to stderr and exit with a BSD-style code.
 fn fetch_url(url: &str, max_bytes: u64) -> (String, String, PathBuf) {
-    let mut response = match ureq::get(url).call() {
-        Ok(resp) => resp,
-        Err(ureq::Error::StatusCode(code)) => {
-            eprintln!("{url}: HTTP {code}");
+    // Agent that does NOT auto-follow redirects: with max_redirects(0), a 3xx is
+    // returned as a normal response so we can validate its destination first.
+    let agent: ureq::Agent = ureq::config::Config::builder()
+        .max_redirects(0)
+        .build()
+        .new_agent();
+
+    let mut current = url.to_string();
+    let mut response = None;
+
+    for _ in 0..=MAX_REDIRECTS {
+        if let Err(e) = validate_public_url(&current) {
+            eprintln!("{current}: refused (SSRF guard): {e}");
             process::exit(EX_NOINPUT);
         }
-        Err(e) => {
-            eprintln!("{url}: {e}");
-            process::exit(EX_NOINPUT);
+
+        let resp = match agent.get(&current).call() {
+            Ok(resp) => resp,
+            Err(ureq::Error::StatusCode(code)) => {
+                eprintln!("{url}: HTTP {code}");
+                process::exit(EX_NOINPUT);
+            }
+            Err(e) => {
+                eprintln!("{current}: {e}");
+                process::exit(EX_NOINPUT);
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let Some(location) = location else {
+                eprintln!("{current}: redirect ({status}) without a Location header");
+                process::exit(EX_NOINPUT);
+            };
+            current = match resolve_redirect(&current, &location) {
+                Ok(next) => next,
+                Err(e) => {
+                    eprintln!("{current}: {e}");
+                    process::exit(EX_NOINPUT);
+                }
+            };
+            continue;
         }
+
+        response = Some(resp);
+        break;
+    }
+
+    let Some(mut response) = response else {
+        eprintln!("{url}: too many redirects (limit is {MAX_REDIRECTS})");
+        process::exit(EX_NOINPUT);
     };
 
     // Read response body with size limit. ureq 3.x uses with_config().limit()
@@ -851,4 +998,87 @@ fn load_file_for_browser(path: &std::path::Path) -> Result<String, String> {
             e.to_string()
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn v4(s: &str) -> IpAddr {
+        IpAddr::V4(s.parse::<Ipv4Addr>().unwrap())
+    }
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse::<Ipv6Addr>().unwrap())
+    }
+
+    #[test]
+    fn blocks_private_and_special_v4() {
+        for s in [
+            "0.0.0.0",          // unspecified
+            "127.0.0.1",        // loopback
+            "10.1.2.3",         // private
+            "172.16.0.1",       // private
+            "192.168.1.1",      // private
+            "169.254.169.254",  // link-local: cloud metadata
+            "100.64.0.1",       // CGNAT
+            "198.18.0.1",       // benchmarking
+            "255.255.255.255",  // broadcast
+            "240.0.0.1",        // reserved
+            "224.0.0.1",        // multicast
+        ] {
+            assert!(is_blocked_ip(v4(s)), "{s} should be blocked");
+        }
+    }
+
+    #[test]
+    fn allows_public_v4() {
+        for s in ["1.1.1.1", "8.8.8.8", "140.82.121.3", "93.184.216.34"] {
+            assert!(!is_blocked_ip(v4(s)), "{s} should be allowed");
+        }
+    }
+
+    #[test]
+    fn blocks_special_v6_and_mapped() {
+        for s in [
+            "::1",                  // loopback
+            "::",                   // unspecified
+            "fc00::1",              // unique local
+            "fe80::1",              // link-local
+            "ff02::1",              // multicast
+            "::ffff:127.0.0.1",     // v4-mapped loopback
+            "::ffff:169.254.169.254", // v4-mapped metadata
+            "::ffff:10.0.0.1",      // v4-mapped private
+        ] {
+            assert!(is_blocked_ip(v6(s)), "{s} should be blocked");
+        }
+        // A v4-mapped public address is still allowed.
+        assert!(!is_blocked_ip(v6("::ffff:1.1.1.1")));
+    }
+
+    #[test]
+    fn validate_rejects_non_public_literals_and_schemes() {
+        assert!(validate_public_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(validate_public_url("http://127.0.0.1:8080/x").is_err());
+        assert!(validate_public_url("http://[::1]/x").is_err());
+        assert!(validate_public_url("http://10.0.0.5/x").is_err());
+        assert!(validate_public_url("ftp://example.com/x").is_err());
+        assert!(validate_public_url("file:///etc/passwd").is_err());
+        // Public IP literal (numeric, no DNS) is accepted.
+        assert!(validate_public_url("https://1.1.1.1/").is_ok());
+    }
+
+    #[test]
+    fn redirect_resolution() {
+        assert_eq!(
+            resolve_redirect("https://a.com/x", "https://b.com/y").unwrap(),
+            "https://b.com/y"
+        );
+        assert_eq!(
+            resolve_redirect("https://a.com/x/y", "/z").unwrap(),
+            "https://a.com/z"
+        );
+        // Non-root relative redirects are refused (fail closed).
+        assert!(resolve_redirect("https://a.com/x", "y").is_err());
+    }
 }
