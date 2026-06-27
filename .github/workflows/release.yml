@@ -166,22 +166,26 @@ jobs:
       # MINISIGN_SECRET_KEY repo secret; MINISIGN_PASSWORD may be empty if the
       # key was generated passwordless (`minisign -G -W`). Produces
       # SHA256SUMS.minisig. Fails the release if the signing secret is missing.
-      - name: Sign SHA256SUMS (minisign)
+      - name: Sign SHA256SUMS (minisign format, via rsign)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           if [ -z "$MINISIGN_SECRET_KEY" ]; then
             echo "error: MINISIGN_SECRET_KEY secret is not set — cannot sign release" >&2
             exit 1
           fi
-          sudo apt-get update -q && sudo apt-get install -y minisign
+          # Sign with rsign2, the tool the signing key was generated with. It
+          # produces a standard minisign signature (verified by install.sh) and
+          # signs passwordless keys non-interactively — unlike jedisct1 minisign,
+          # which prompts for a password even with -W and fails in CI.
+          cargo install rsign2 --locked --quiet
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
-          printf '%s' "$MINISIGN_PASSWORD" | minisign -S \
+          rsign sign -W \
             -s "$RUNNER_TEMP/minisign.key" \
-            -m dist/SHA256SUMS \
-            -t "mdink ${GITHUB_REF_NAME} checksums"
+            -x dist/SHA256SUMS.minisig \
+            -t "mdink ${GITHUB_REF_NAME} checksums" \
+            dist/SHA256SUMS
           rm -f "$RUNNER_TEMP/minisign.key"
           cat dist/SHA256SUMS.minisig
 
