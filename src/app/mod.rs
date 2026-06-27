@@ -658,8 +658,17 @@ fn walk_dir(base: &std::path::Path, dir: &std::path::Path, depth: usize, files: 
     };
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
+        // Use the entry's own type so symlinks are never followed: a symlinked
+        // file or directory could escape the working-directory subtree (or form
+        // a traversal loop). Skip symlinks entirely.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             // Skip hidden directories.
             if entry
                 .file_name()
@@ -669,7 +678,7 @@ fn walk_dir(base: &std::path::Path, dir: &std::path::Path, depth: usize, files: 
                 continue;
             }
             subdirs.push(path);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
                     if let Ok(rel) = path.strip_prefix(base) {

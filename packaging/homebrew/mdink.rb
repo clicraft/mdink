@@ -14,22 +14,22 @@ class Mdink < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-macos-aarch64.tar.gz"
       sha256 "SHA256_PLACEHOLDER_MACOS_ARM"
     end
     on_intel do
-      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-macos-x86_64.tar.gz"
       sha256 "SHA256_PLACEHOLDER_MACOS_INTEL"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-linux-aarch64.tar.gz"
       sha256 "SHA256_PLACEHOLDER_LINUX_ARM"
     end
     on_intel do
-      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/clicraft/mdink/releases/download/v#{version}/mdink-linux-x86_64.tar.gz"
       sha256 "SHA256_PLACEHOLDER_LINUX_INTEL"
     end
   end

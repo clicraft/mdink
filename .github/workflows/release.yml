@@ -139,6 +139,11 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # Checkout first: the Homebrew formula template lives in the repo, and
+      # actions/checkout cleans the workspace (would wipe dist/ if run after
+      # the artifact download).
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -180,6 +185,35 @@ jobs:
           rm -f "$RUNNER_TEMP/minisign.key"
           cat dist/SHA256SUMS.minisig
 
+      # Render the Homebrew formula with the real version and per-archive
+      # sha256s (pulled from the SHA256SUMS we just generated — single source of
+      # truth). Output is attached to the release as mdink.rb so a tap can point
+      # at it / users can `brew install <url-to-mdink.rb>`. Fails the release if
+      # any placeholder is left unfilled (e.g. an archive name drifts).
+      - name: Render Homebrew formula
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"   # v0.2.2 -> 0.2.2 (formula adds the 'v' back in URLs)
+          sha() {
+            local h
+            h="$(awk -v f="$1" '$2 == f { print $1 }' dist/SHA256SUMS)"
+            [ -n "$h" ] || { echo "error: no sha256 for '$1' in SHA256SUMS" >&2; exit 1; }
+            printf '%s' "$h"
+          }
+          sed \
+            -e "s/VERSION_PLACEHOLDER/${version}/g" \
+            -e "s/SHA256_PLACEHOLDER_MACOS_ARM/$(sha mdink-macos-aarch64.tar.gz)/g" \
+            -e "s/SHA256_PLACEHOLDER_MACOS_INTEL/$(sha mdink-macos-x86_64.tar.gz)/g" \
+            -e "s/SHA256_PLACEHOLDER_LINUX_ARM/$(sha mdink-linux-aarch64.tar.gz)/g" \
+            -e "s/SHA256_PLACEHOLDER_LINUX_INTEL/$(sha mdink-linux-x86_64.tar.gz)/g" \
+            packaging/homebrew/mdink.rb > dist/mdink.rb
+          echo "── rendered mdink.rb ──"
+          cat dist/mdink.rb
+          if grep -q "PLACEHOLDER" dist/mdink.rb; then
+            echo "error: unfilled placeholder remains in rendered formula" >&2
+            exit 1
+          fi
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -191,3 +225,4 @@ jobs:
             dist/*.deb
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig
+            dist/mdink.rb

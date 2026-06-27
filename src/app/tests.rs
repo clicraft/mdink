@@ -707,3 +707,33 @@
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.search.as_ref().unwrap().query, "qj");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dir_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("mdink_walk_test_{pid}"));
+        let outside = std::env::temp_dir().join(format!("mdink_walk_outside_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real/in.md"), "# in").unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("leak.md"), "# leak").unwrap();
+
+        // A symlinked .md file and a symlinked directory, both pointing outside.
+        symlink(outside.join("leak.md"), root.join("link.md")).unwrap();
+        symlink(&outside, root.join("linkdir")).unwrap();
+
+        let mut files = Vec::new();
+        walk_dir(&root, &root, 0, &mut files);
+
+        // Only the real in-tree file is found; the symlinks are skipped.
+        assert!(files.iter().any(|p| p.ends_with("real/in.md")));
+        assert!(!files.iter().any(|p| p.to_string_lossy().contains("link")));
+        assert!(!files.iter().any(|p| p.to_string_lossy().contains("leak")));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }

@@ -985,13 +985,36 @@ fn run_event_loop(
     Ok(())
 }
 
+/// Canonicalizes `path` and confirms it stays within `base`.
+///
+/// Resolves all symlinks and `..` segments, then checks containment against the
+/// canonicalized base. Rejects anything that escapes the subtree — guarding the
+/// file browser against symlinked entries and TOCTOU symlink swaps between
+/// directory discovery and the actual read. Returns the resolved path.
+fn resolve_within(base: &Path, path: &Path) -> Result<PathBuf, String> {
+    let base = base.canonicalize().map_err(|e| e.to_string())?;
+    let resolved = path.canonicalize().map_err(|e| e.to_string())?;
+    if resolved.starts_with(&base) {
+        Ok(resolved)
+    } else {
+        Err("refusing to read a file outside the working directory".to_string())
+    }
+}
+
 /// Loads a file for the file browser with the same guards as the initial load.
+///
+/// The browser only ever offers paths within the working-directory subtree;
+/// this re-validates containment at read time (defense in depth) so a symlink
+/// cannot escape even if one is swapped in after discovery.
 fn load_file_for_browser(path: &std::path::Path) -> Result<String, String> {
-    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    let base = std::env::current_dir().map_err(|e| e.to_string())?;
+    let resolved = resolve_within(&base, path)?;
+
+    let metadata = fs::metadata(&resolved).map_err(|e| e.to_string())?;
     if metadata.len() > MAX_FILE_BYTES {
         return Err(format!("file too large ({} bytes)", metadata.len()));
     }
-    fs::read_to_string(path).map_err(|e| {
+    fs::read_to_string(&resolved).map_err(|e| {
         if e.kind() == std::io::ErrorKind::InvalidData {
             "not valid UTF-8 text".to_string()
         } else {
@@ -1080,5 +1103,30 @@ mod tests {
         );
         // Non-root relative redirects are refused (fail closed).
         assert!(resolve_redirect("https://a.com/x", "y").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_confined_to_subtree() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("mdink_browser_test_{pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+
+        // A real file inside the subtree resolves fine.
+        let inside = base.join("sub/ok.md");
+        std::fs::write(&inside, "# ok").unwrap();
+        assert!(resolve_within(&base, &inside).is_ok());
+
+        // A symlink pointing outside the subtree is rejected.
+        let secret = std::env::temp_dir().join(format!("mdink_secret_{pid}.md"));
+        std::fs::write(&secret, "secret").unwrap();
+        let escape = base.join("escape.md");
+        symlink(&secret, &escape).unwrap();
+        assert!(resolve_within(&base, &escape).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&secret);
     }
 }
