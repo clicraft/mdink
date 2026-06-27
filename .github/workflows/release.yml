@@ -9,9 +9,35 @@ permissions:
   contents: write
 
 jobs:
+  # ── Guard: the git tag must match the crate version ───────────────────
+  # Fails fast (before any build) if a tag like v0.2.4 doesn't match
+  # Cargo.toml's version, so binaries/.deb can't ship a mismatched version.
+  # No-op on non-tag (workflow_dispatch / branch) runs.
+  check-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare tag to crate version
+        run: |
+          case "${GITHUB_REF}" in
+            refs/tags/*) ;;
+            *) echo "not a tag push — skipping version check"; exit 0 ;;
+          esac
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag version:   $tag"
+          echo "crate version: $crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::git tag v$tag does not match Cargo.toml version $crate — bump Cargo.toml or fix the tag"
+            exit 1
+          fi
+          echo "✓ tag and Cargo.toml agree ($crate)"
+
   # ── Generate man page and shell completions (once, platform-independent) ──
   assets:
     name: Generate dist assets
+    needs: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -31,6 +57,7 @@ jobs:
   # ── Binary archives (tar.gz / zip) ────────────────────────────────
   build:
     name: ${{ matrix.target }}
+    needs: check-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
