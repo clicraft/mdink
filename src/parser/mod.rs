@@ -1262,40 +1262,69 @@ fn accent(mut base: String, mark: char) -> String {
 /// literal `\(` inside a snippet is never rewritten. Returns `Cow::Borrowed`
 /// when there is nothing to do (the common case).
 fn normalize_math_delimiters(src: &str) -> Cow<'_, str> {
-    if !src.contains("\\(")
-        && !src.contains("\\[")
-        && !src.contains("\\)")
-        && !src.contains("\\]")
-    {
+    if !src.contains("\\(") && !src.contains("\\[") {
         return Cow::Borrowed(src);
     }
+    let chars: Vec<char> = src.chars().collect();
+    let protected = compute_code_mask(src, chars.len());
     let mut out = String::with_capacity(src.len());
-    let mut fence: Option<(char, usize)> = None;
-    for line in src.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let marker = fence_marker(body.trim_start());
-        match fence {
-            Some((fc, flen)) => {
-                if marker.is_some_and(|(c, n)| c == fc && n >= flen) {
-                    fence = None;
-                }
-                out.push_str(line);
-                continue;
-            }
-            None => {
-                if let Some(m) = marker {
-                    fence = Some(m);
-                    out.push_str(line);
+    let mut i = 0;
+    while i < chars.len() {
+        // Only an *unprotected* opener with a matching closer is rewritten.
+        if !protected[i] && chars[i] == '\\' && i + 1 < chars.len() {
+            let close = match chars[i + 1] {
+                '(' => Some(')'),
+                '[' => Some(']'),
+                _ => None,
+            };
+            if let Some(close_ch) = close {
+                if let Some(j) = find_close_delimiter(&chars, &protected, i + 2, close_ch) {
+                    let marker = if chars[i + 1] == '(' { "$" } else { "$$" };
+                    out.push_str(marker);
+                    out.extend(&chars[i + 2..j]); // content verbatim
+                    out.push_str(marker);
+                    i = j + 2;
                     continue;
                 }
             }
         }
-        normalize_prose_line(body, &mut out);
-        if line.ends_with('\n') {
-            out.push('\n');
-        }
+        out.push(chars[i]);
+        i += 1;
     }
     Cow::Owned(out)
+}
+
+/// Finds the `\<close>` matching an opener, searching from `from`. Returns
+/// `None` — leaving the opener literal — if the search crosses a blank line
+/// (paragraph break), hits end-of-input, or the only closer is inside code.
+/// This bounds the blast radius of an unmatched `\(`/`\[` to nothing: it never
+/// rewrites a dangling delimiter that could swallow following markdown.
+fn find_close_delimiter(
+    chars: &[char],
+    protected: &[bool],
+    from: usize,
+    close: char,
+) -> Option<usize> {
+    let mut k = from;
+    while k + 1 < chars.len() {
+        if chars[k] == '\n' && rest_of_line_blank(chars, k + 1) {
+            return None; // paragraph break before a closer
+        }
+        if !protected[k] && chars[k] == '\\' && chars[k + 1] == close {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// True if `chars[idx..]` is whitespace up to the next newline or end — i.e. the
+/// newline at `idx - 1` begins a blank line.
+fn rest_of_line_blank(chars: &[char], idx: usize) -> bool {
+    chars[idx..]
+        .iter()
+        .take_while(|&&c| c != '\n')
+        .all(|c| c.is_whitespace())
 }
 
 /// Returns `(fence_char, run_length)` if `trimmed` opens/closes a code fence.
@@ -1308,47 +1337,58 @@ fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
     (n >= 3).then_some((first, n))
 }
 
-/// Replaces math delimiters on a single prose line, skipping inline code spans.
-fn normalize_prose_line(line: &str, out: &mut String) {
-    let mut chars = line.chars().peekable();
-    let mut code_run = 0usize; // backtick-run length of the span we're inside, 0 = none
-    while let Some(c) = chars.next() {
-        if c == '`' {
-            let mut n = 1;
-            while chars.peek() == Some(&'`') {
-                n += 1;
-                chars.next();
+/// Marks every character that lives inside a fenced code block or an inline
+/// `` `code` `` span, so delimiter rewriting never touches code.
+fn compute_code_mask(src: &str, n: usize) -> Vec<bool> {
+    let mut prot = vec![false; n];
+    let mut idx = 0usize;
+    let mut fence: Option<(char, usize)> = None;
+    for line in src.split_inclusive('\n') {
+        let lc: Vec<char> = line.chars().collect();
+        let llen = lc.len();
+        let body_len = if line.ends_with('\n') { llen - 1 } else { llen };
+        let body: String = lc[..body_len].iter().collect();
+        let marker = fence_marker(body.trim_start());
+        if let Some((fc, flen)) = fence {
+            prot[idx..idx + llen].fill(true);
+            if marker.is_some_and(|(c, m)| c == fc && m >= flen) {
+                fence = None;
             }
-            for _ in 0..n {
-                out.push('`');
-            }
-            if code_run == 0 {
-                code_run = n;
-            } else if code_run == n {
-                code_run = 0;
-            }
+            idx += llen;
             continue;
         }
-        if code_run > 0 {
-            out.push(c);
+        if let Some(m) = marker {
+            fence = Some(m);
+            prot[idx..idx + llen].fill(true);
+            idx += llen;
             continue;
         }
-        if c == '\\' {
-            match chars.peek() {
-                Some('(' | ')') => {
-                    chars.next();
-                    out.push('$');
+        // Inline code spans: protect backtick runs and everything between them.
+        let mut code_run = 0usize;
+        let mut o = 0usize;
+        while o < body_len {
+            if lc[o] == '`' {
+                let mut run = 1;
+                while o + run < body_len && lc[o + run] == '`' {
+                    run += 1;
                 }
-                Some('[' | ']') => {
-                    chars.next();
-                    out.push_str("$$");
+                prot[idx + o..idx + o + run].fill(true);
+                if code_run == 0 {
+                    code_run = run;
+                } else if code_run == run {
+                    code_run = 0;
                 }
-                _ => out.push('\\'),
+                o += run;
+                continue;
             }
-            continue;
+            if code_run > 0 {
+                prot[idx + o] = true;
+            }
+            o += 1;
         }
-        out.push(c);
+        idx += llen;
     }
+    prot
 }
 
 // ── Display-math layout (top-level stacked fractions) ────────────────────────
@@ -1373,16 +1413,20 @@ fn render_display_math(latex: &str) -> String {
     for piece in &pieces {
         match piece {
             DisplayPiece::Text(s) => {
-                let w = display_width(s);
+                // Flatten any embedded break so the stacked block stays 3 lines.
+                let s = s.replace('\n', " ");
+                let w = display_width(&s);
                 top.push_str(&" ".repeat(w));
-                mid.push_str(s);
+                mid.push_str(&s);
                 bot.push_str(&" ".repeat(w));
             }
             DisplayPiece::Frac(num, den) => {
-                let w = display_width(num).max(display_width(den)).max(1);
-                top.push_str(&center_in(num, w));
+                let num = num.replace('\n', " ");
+                let den = den.replace('\n', " ");
+                let w = display_width(&num).max(display_width(&den)).max(1);
+                top.push_str(&center_in(&num, w));
                 mid.push_str(&"\u{2500}".repeat(w)); // ─ fraction bar
-                bot.push_str(&center_in(den, w));
+                bot.push_str(&center_in(&den, w));
             }
         }
     }

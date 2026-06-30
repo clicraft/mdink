@@ -1671,6 +1671,101 @@
         assert!(text.contains("$$\u{03B1} + \u{03B2}$$"), "got: {text:?}");
     }
 
+    // ── Fail-safe / robustness tests ─────────────────────────────────────────
+    //
+    // Malformed math (missing closing `$`, `}`, `\]`, `\end`) must stay
+    // contained: it may render ugly, but it must never panic and never consume
+    // the surrounding document.
+
+    /// The normalizer rewrites `\(`/`\[` ONLY when a matching closer exists in
+    /// the same paragraph. An unmatched opener is left literal so it can never
+    /// inject a dangling `$`/`$$` that swallows later markdown.
+    #[test]
+    fn test_normalize_only_converts_matched_pairs() {
+        let n = super::normalize_math_delimiters;
+        assert_eq!(n("\\(x\\)"), "$x$");
+        assert_eq!(n("\\[x\\]"), "$$x$$");
+        assert_eq!(n("\\[\nx\n\\]"), "$$\nx\n$$"); // multi-line within a paragraph
+        // Unmatched openers stay literal.
+        assert_eq!(n("\\[ x = 1 with no close"), "\\[ x = 1 with no close");
+        assert_eq!(n("a \\( b with no close"), "a \\( b with no close");
+        // A paragraph break between opener and closer prevents matching.
+        assert_eq!(n("\\[ x\n\n\\]"), "\\[ x\n\n\\]");
+    }
+
+    /// An unmatched `\[` must not consume a following heading or a later,
+    /// legitimately-paired `$$` block.
+    #[test]
+    fn test_normalize_does_not_swallow_following_blocks() {
+        let blocks = parse("\\[ x = 1\n\n## Survivor\n\n$$ y = 2 $$\n\nTail.", h());
+        let has_heading = blocks.iter().any(|b| {
+            matches!(b, RenderedBlock::Heading { content, .. }
+                if content.iter().any(|s| s.text.contains("Survivor")))
+        });
+        assert!(has_heading, "heading after an unmatched \\[ was swallowed");
+    }
+
+    /// An unclosed `$$` (native pulldown math) degrades to literal text; the
+    /// following heading must still parse as a heading.
+    #[test]
+    fn test_parser_unclosed_display_math_contained() {
+        let blocks = parse("$$\\frac{a}{b}\n\n## After\n\nBody.", h());
+        let has_heading = blocks.iter().any(|b| {
+            matches!(b, RenderedBlock::Heading { content, .. }
+                if content.iter().any(|s| s.text.contains("After")))
+        });
+        assert!(has_heading, "unclosed $$ swallowed the following heading");
+    }
+
+    /// Truncated/malformed LaTeX must never panic — neither the inline nor the
+    /// display path. Covers unclosed braces, missing args, dangling markers,
+    /// and an environment with no `\end`.
+    #[test]
+    fn test_unicode_math_malformed_never_panics() {
+        let cases = [
+            "\\frac{a",
+            "\\sqrt{x + 1",
+            "{{{deep",
+            "a}}}",
+            "\\",
+            "^",
+            "_{",
+            "x^{",
+            "\\begin{pmatrix} a & b",
+            "\\frac{\\frac{\\frac{",
+            "\\mathbb{",
+            "\\hat{",
+        ];
+        for c in cases {
+            let _ = super::unicode_math(c);
+            let _ = super::render_display_math(c);
+        }
+    }
+
+    /// Every prefix of a complex formula converts without panicking, and any
+    /// stacked fraction stays exactly three lines — a malformed `\frac` can
+    /// never explode the display block vertically.
+    #[test]
+    fn test_unicode_math_truncation_is_bounded() {
+        let full = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a} \
+                    + \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}";
+        let chars: Vec<char> = full.chars().collect();
+        for i in 0..=chars.len() {
+            let prefix: String = chars[..i].iter().collect();
+            let _ = super::unicode_math(&prefix);
+            let out = super::render_display_math(&prefix);
+            if out.contains('\u{2500}') {
+                // A stacked fraction is always exactly three rows (two breaks),
+                // regardless of how malformed the input is.
+                assert_eq!(
+                    out.matches('\n').count(),
+                    2,
+                    "stacked display was not 3 rows for prefix {prefix:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_parser_inline_math_produces_styled_span() {
         let blocks = parse("The formula $E = mc^{2}$ is famous.", h());
