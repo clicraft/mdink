@@ -903,216 +903,485 @@ fn sanitize_text(s: &str) -> Cow<'_, str> {
 
 // ── LaTeX-to-Unicode conversion ──────────────────────────────────────────────
 
-/// Best-effort conversion of LaTeX math commands to Unicode characters.
+/// Best-effort conversion of LaTeX math to a single-line Unicode approximation.
 ///
-/// Handles Greek letters, common operators, arrows, and limited
-/// superscript/subscript notation. Unrecognized commands pass through as-is.
+/// This is the *fallback* renderer: mdink does not typeset real equations, so
+/// the goal here is to be **correct and unambiguous**, not pretty. Braces group
+/// invisibly, fractions render as `a/b` (parenthesizing compound operands),
+/// roots as `√(…)`, matrices as `[a b; c d]`, and super/subscripts use real
+/// Unicode glyphs only when every character maps — otherwise they fall back to
+/// `^(…)` / `_(…)` so nothing ever leaks raw LaTeX like `\pi`.
+///
+/// Unrecognized commands pass through verbatim (`\foo` → `\foo`).
 fn unicode_math(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            // Collect the command name (alphabetic characters after \).
-            let mut cmd = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_alphabetic() {
-                    cmd.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if cmd.is_empty() {
-                // Escaped non-alpha character (e.g. \{ \} \#): pass through.
-                if let Some(&next) = chars.peek() {
-                    result.push(next);
-                    chars.next();
-                } else {
-                    result.push('\\');
-                }
-            } else if let Some(replacement) = latex_command_to_unicode(&cmd) {
-                result.push_str(replacement);
-            } else {
-                // Unrecognized command: pass through as-is.
-                result.push('\\');
-                result.push_str(&cmd);
-            }
-        } else if ch == '^' {
-            // Superscript: ^{...} or ^x
-            let content = collect_braced_or_single(&mut chars);
-            for c in content.chars() {
-                result.push(superscript_char(c));
-            }
-        } else if ch == '_' {
-            // Subscript: _{...} or _x
-            let content = collect_braced_or_single(&mut chars);
-            for c in content.chars() {
-                result.push(subscript_char(c));
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
+    convert_seq(&mut chars, false)
 }
 
-/// Collects content from `{...}` braces or a single character.
-fn collect_braced_or_single(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
-    if chars.peek() == Some(&'{') {
-        chars.next(); // consume '{'
-        let mut content = String::new();
-        let mut depth = 1u32;
-        for c in chars.by_ref() {
-            if c == '{' {
+type CharStream<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Converts a run of math tokens. When `in_group`, stops at (and consumes) the
+/// matching unescaped `}` — this is how `{...}` grouping is made invisible.
+fn convert_seq(chars: &mut CharStream<'_>, in_group: bool) -> String {
+    let mut out = String::new();
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            '}' if in_group => {
+                chars.next();
+                break;
+            }
+            '\\' => {
+                chars.next();
+                out.push_str(&parse_backslash(chars));
+            }
+            '{' => {
+                chars.next();
+                out.push_str(&convert_seq(chars, true));
+            }
+            '^' => {
+                chars.next();
+                let atom = read_atom(chars);
+                out.push_str(&apply_script(&atom, true));
+            }
+            '_' => {
+                chars.next();
+                let atom = read_atom(chars);
+                out.push_str(&apply_script(&atom, false));
+            }
+            '\'' => {
+                chars.next();
+                out.push('\u{2032}'); // prime
+            }
+            '&' => {
+                chars.next();
+                out.push(' '); // stray alignment tab outside a matrix
+            }
+            _ => {
+                chars.next();
+                out.push(ch);
+            }
+        }
+    }
+    out
+}
+
+/// Reads and converts a single "atom": a `{...}` group, one `\command`, or one
+/// bare character. The operand of `^`, `_`, `\frac`, `\sqrt`, accents, etc.
+fn read_atom(chars: &mut CharStream<'_>) -> String {
+    match chars.peek() {
+        Some('{') => {
+            chars.next();
+            convert_seq(chars, true)
+        }
+        Some('\\') => {
+            chars.next();
+            parse_backslash(chars)
+        }
+        Some(_) => chars.next().map(|c| c.to_string()).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// Handles everything after a `\`: a named command (with its arguments) or an
+/// escaped non-alphabetic character.
+fn parse_backslash(chars: &mut CharStream<'_>) -> String {
+    if matches!(chars.peek(), Some(c) if c.is_ascii_alphabetic()) {
+        let mut name = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_alphabetic() {
+                name.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        return parse_command(chars, &name);
+    }
+    // Escaped single character (\{ \} \\ \% \, …).
+    match chars.next() {
+        Some('\\') => "\n".to_string(),      // line break
+        Some(' ' | ',' | ';' | ':') => " ".to_string(),
+        Some('!') => String::new(),          // negative thin space
+        Some('|') => "\u{2016}".to_string(), // \| → ‖
+        Some(c) => c.to_string(),            // \{ \} \# \$ \% \_ \& …
+        None => "\\".to_string(),
+    }
+}
+
+/// Dispatches a named LaTeX command to its Unicode rendering.
+fn parse_command(chars: &mut CharStream<'_>, name: &str) -> String {
+    match name {
+        "frac" | "dfrac" | "tfrac" | "cfrac" => {
+            let num = read_atom(chars);
+            let den = read_atom(chars);
+            format!("{}/{}", paren_if_compound(&num), paren_if_compound(&den))
+        }
+        "binom" | "dbinom" | "tbinom" => {
+            let n = read_atom(chars);
+            let k = read_atom(chars);
+            format!("C({n}, {k})")
+        }
+        "pmod" => format!("(mod {})", read_atom(chars)),
+        "bmod" => "mod".to_string(),
+        "sqrt" => {
+            let index = read_optional_bracket(chars);
+            let radicand = paren_if_compound(&read_atom(chars));
+            match index.as_deref() {
+                None | Some("") | Some("2") => format!("\u{221A}{radicand}"),
+                Some("3") => format!("\u{221B}{radicand}"),
+                Some("4") => format!("\u{221C}{radicand}"),
+                Some(n) => format!("{}\u{221A}{radicand}", apply_script(n, true)),
+            }
+        }
+        "begin" => parse_environment(chars),
+        "end" => {
+            let _ = read_raw_group(chars);
+            String::new()
+        }
+        // Literal-text wrappers: keep content verbatim, drop styling.
+        "text" | "textrm" | "textbf" | "textit" | "textsf" | "texttt" | "mbox"
+        | "operatorname" => read_raw_group(chars),
+        // Math-style wrappers: convert content, drop styling.
+        "mathrm" | "mathbf" | "mathit" | "mathsf" | "mathtt" | "mathnormal"
+        | "boldsymbol" | "bm" | "mathcal" | "mathfrak" | "mathscr" => read_atom(chars),
+        "mathbb" | "mathds" => read_raw_group(chars).chars().map(blackboard_char).collect(),
+        // Accents: a combining mark applied to the (converted) base.
+        "hat" | "widehat" => accent(read_atom(chars), '\u{0302}'),
+        "bar" | "overline" => accent(read_atom(chars), '\u{0304}'),
+        "vec" => accent(read_atom(chars), '\u{20D7}'),
+        "tilde" | "widetilde" => accent(read_atom(chars), '\u{0303}'),
+        "dot" => accent(read_atom(chars), '\u{0307}'),
+        "ddot" => accent(read_atom(chars), '\u{0308}'),
+        "phantom" | "hphantom" | "vphantom" => {
+            let _ = read_atom(chars);
+            String::new()
+        }
+        // Sizing/delimiter prefixes are invisible; the delimiter char follows.
+        // `\left.` / `\right.` use `.` as an *invisible* delimiter — eat it.
+        "left" | "right" | "big" | "Big" | "bigg" | "Bigg" | "bigl" | "bigr"
+        | "Bigl" | "Bigr" | "biggl" | "biggr" | "Biggl" | "Biggr" => {
+            if chars.peek() == Some(&'.') {
+                chars.next();
+            }
+            String::new()
+        }
+        _ => {
+            if let Some(sym) = latex_symbol(name) {
+                sym.to_string()
+            } else if is_math_function(name) {
+                name.to_string()
+            } else {
+                format!("\\{name}")
+            }
+        }
+    }
+}
+
+/// Reads an optional `[...]` argument (e.g. the index of `\sqrt[3]{x}`).
+fn read_optional_bracket(chars: &mut CharStream<'_>) -> Option<String> {
+    if chars.peek() != Some(&'[') {
+        return None;
+    }
+    chars.next();
+    let mut inner = String::new();
+    for c in chars.by_ref() {
+        if c == ']' {
+            break;
+        }
+        inner.push(c);
+    }
+    Some(unicode_math(&inner))
+}
+
+/// Reads a `{...}` group (or a single char) as *raw* text, without converting
+/// its contents. Used for environment names and literal-text wrappers.
+fn read_raw_group(chars: &mut CharStream<'_>) -> String {
+    if chars.peek() != Some(&'{') {
+        return chars.next().map(|c| c.to_string()).unwrap_or_default();
+    }
+    chars.next();
+    let mut inner = String::new();
+    let mut depth = 1u32;
+    for c in chars.by_ref() {
+        match c {
+            '{' => {
                 depth += 1;
-                content.push(c);
-            } else if c == '}' {
+                inner.push(c);
+            }
+            '}' => {
                 depth -= 1;
                 if depth == 0 {
                     break;
                 }
-                content.push(c);
-            } else {
-                content.push(c);
+                inner.push(c);
             }
+            _ => inner.push(c),
         }
-        content
-    } else if let Some(&c) = chars.peek() {
-        chars.next();
-        c.to_string()
+    }
+    inner
+}
+
+/// Renders `\begin{env} … \end{env}` as a compact single-line matrix.
+fn parse_environment(chars: &mut CharStream<'_>) -> String {
+    let env = read_raw_group(chars);
+    // Collect the raw body up to the matching \end{...}.
+    let mut body = String::new();
+    while let Some(&c) = chars.peek() {
+        if c == '\\' {
+            chars.next();
+            let mut cmd = String::new();
+            while let Some(&a) = chars.peek() {
+                if a.is_ascii_alphabetic() {
+                    cmd.push(a);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if cmd == "end" {
+                let _ = read_raw_group(chars);
+                break;
+            } else if cmd.is_empty() {
+                // Escaped char (incl. the `\\` row separator): preserve both.
+                body.push('\\');
+                if let Some(n) = chars.next() {
+                    body.push(n);
+                }
+            } else {
+                body.push('\\');
+                body.push_str(&cmd);
+            }
+        } else {
+            chars.next();
+            body.push(c);
+        }
+    }
+    render_matrix(&env, &body)
+}
+
+/// Joins matrix cells into `a b; c d` and wraps them per environment delimiter.
+fn render_matrix(env: &str, body: &str) -> String {
+    let rows: Vec<String> = body
+        .split("\\\\")
+        .map(|row| {
+            row.split('&')
+                .map(|cell| unicode_math(cell.trim()))
+                .filter(|c| !c.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|r| !r.is_empty())
+        .collect();
+    let inner = rows.join("; ");
+    match env {
+        "pmatrix" => format!("({inner})"),
+        "bmatrix" => format!("[{inner}]"),
+        "Bmatrix" => format!("{{{inner}}}"),
+        "vmatrix" => format!("|{inner}|"),
+        "Vmatrix" => format!("\u{2016}{inner}\u{2016}"),
+        "cases" => format!("{{ {inner}"),
+        _ => inner,
+    }
+}
+
+/// Applies a super- (`sup = true`) or subscript to an already-converted atom.
+/// Uses real Unicode glyphs only when *every* character maps; otherwise emits
+/// `^(...)` / `_(...)` so nothing renders as broken raw LaTeX.
+fn apply_script(atom: &str, sup: bool) -> String {
+    let mapped: Option<String> = atom
+        .chars()
+        .map(|c| if sup { superscript(c) } else { subscript(c) })
+        .collect();
+    if let Some(s) = mapped {
+        return s;
+    }
+    let marker = if sup { '^' } else { '_' };
+    if atom.chars().count() <= 1 {
+        format!("{marker}{atom}")
     } else {
-        String::new()
+        format!("{marker}({atom})")
     }
 }
 
-/// Maps a character to its Unicode superscript equivalent, if one exists.
-/// Falls back to the original character for unmapped codepoints.
-fn superscript_char(c: char) -> char {
+/// Wraps `s` in parentheses when it is a compound expression, so that
+/// `\frac{1}{2a}` reads as `1/(2a)` rather than the ambiguous `1/2a`.
+fn paren_if_compound(s: &str) -> String {
+    if s.chars().count() <= 1 || already_bracketed(s) {
+        s.to_string()
+    } else {
+        format!("({s})")
+    }
+}
+
+/// True if `s` is already enclosed in a single matching `(...)`/`[...]` pair.
+fn already_bracketed(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    let close = match chars.first() {
+        Some('(') => ')',
+        Some('[') => ']',
+        _ => return false,
+    };
+    if chars.last() != Some(&close) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => {
+                depth -= 1;
+                if depth == 0 && i != chars.len() - 1 {
+                    return false; // closes before the end → not a single wrap
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Appends a combining accent mark to a base string (`\hat{x}` → `x̂`).
+fn accent(mut base: String, mark: char) -> String {
+    base.push(mark);
+    base
+}
+
+/// Maps a LaTeX command name to a standalone Unicode symbol.
+///
+/// Structural commands (`\frac`, `\sqrt`, `\begin`, accents, text wrappers, …)
+/// are handled in `parse_command`; this table is only single-token symbols.
+fn latex_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
+        // ── Greek lowercase ──
+        "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ",
+        "epsilon" => "ε", "varepsilon" => "ε", "zeta" => "ζ", "eta" => "η",
+        "theta" => "θ", "vartheta" => "ϑ", "iota" => "ι", "kappa" => "κ",
+        "lambda" => "λ", "mu" => "μ", "nu" => "ν", "xi" => "ξ",
+        "omicron" => "ο", "pi" => "π", "varpi" => "ϖ", "rho" => "ρ",
+        "varrho" => "ϱ", "sigma" => "σ", "varsigma" => "ς", "tau" => "τ",
+        "upsilon" => "υ", "phi" => "ϕ", "varphi" => "φ", "chi" => "χ",
+        "psi" => "ψ", "omega" => "ω",
+        // ── Greek uppercase ──
+        "Gamma" => "Γ", "Delta" => "Δ", "Theta" => "Θ", "Lambda" => "Λ",
+        "Xi" => "Ξ", "Pi" => "Π", "Sigma" => "Σ", "Upsilon" => "Υ",
+        "Phi" => "Φ", "Psi" => "Ψ", "Omega" => "Ω",
+        // ── Binary operators ──
+        "times" => "×", "div" => "÷", "pm" => "±", "mp" => "∓",
+        "cdot" => "·", "ast" => "∗", "star" => "⋆", "circ" => "∘",
+        "bullet" => "•", "oplus" => "⊕", "ominus" => "⊖", "otimes" => "⊗",
+        "oslash" => "⊘", "odot" => "⊙", "setminus" => "∖", "wr" => "≀",
+        "amalg" => "⨿", "sqcup" => "⊔", "sqcap" => "⊓", "uplus" => "⊎",
+        "dagger" => "†", "ddagger" => "‡",
+        // ── Relations ──
+        "leq" | "le" => "≤", "geq" | "ge" => "≥", "neq" | "ne" => "≠",
+        "approx" => "≈", "approxeq" => "≊", "equiv" => "≡", "cong" => "≅",
+        "simeq" => "≃", "sim" => "∼", "propto" => "∝", "asymp" => "≍",
+        "doteq" => "≐", "ll" => "≪", "gg" => "≫", "prec" => "≺",
+        "succ" => "≻", "preceq" => "⪯", "succeq" => "⪰", "lesssim" => "≲",
+        "gtrsim" => "≳", "subset" => "⊂", "supset" => "⊃",
+        "subseteq" => "⊆", "supseteq" => "⊇", "subsetneq" => "⊊",
+        "supsetneq" => "⊋", "sqsubseteq" => "⊑", "sqsupseteq" => "⊒",
+        "in" => "∈", "notin" => "∉", "ni" => "∋", "perp" => "⊥",
+        "parallel" => "∥", "mid" => "∣", "models" => "⊨", "vdash" => "⊢",
+        "dashv" => "⊣",
+        // ── Set / logic ──
+        "cup" => "∪", "cap" => "∩", "emptyset" => "∅", "varnothing" => "∅",
+        "land" | "wedge" => "∧", "lor" | "vee" => "∨", "neg" | "lnot" => "¬",
+        "forall" => "∀", "exists" => "∃", "nexists" => "∄", "top" => "⊤",
+        "bot" => "⊥", "therefore" => "∴", "because" => "∵",
+        "implies" => "⟹", "impliedby" => "⟸", "iff" => "⟺",
+        // ── Big operators ──
+        "sum" => "∑", "prod" => "∏", "coprod" => "∐", "int" => "∫",
+        "iint" => "∬", "iiint" => "∭", "oint" => "∮", "bigcup" => "⋃",
+        "bigcap" => "⋂", "bigoplus" => "⨁", "bigotimes" => "⨂",
+        "bigvee" => "⋁", "bigwedge" => "⋀", "bigsqcup" => "⨆",
+        // ── Calculus / analysis ──
+        "partial" => "∂", "nabla" => "∇", "infty" => "∞", "Re" => "ℜ",
+        "Im" => "ℑ", "wp" => "℘", "ell" => "ℓ", "hbar" => "ℏ",
+        "aleph" => "ℵ", "beth" => "ℶ", "angle" => "∠", "measuredangle" => "∡",
+        "triangle" => "△", "square" => "□", "diamond" => "⋄", "surd" => "√",
+        // ── Arrows ──
+        "to" | "rightarrow" => "→", "leftarrow" | "gets" => "←",
+        "leftrightarrow" => "↔", "Rightarrow" => "⇒", "Leftarrow" => "⇐",
+        "Leftrightarrow" => "⇔", "uparrow" => "↑", "downarrow" => "↓",
+        "updownarrow" => "↕", "Uparrow" => "⇑", "Downarrow" => "⇓",
+        "mapsto" => "↦", "longmapsto" => "⟼", "hookrightarrow" => "↪",
+        "hookleftarrow" => "↩", "longrightarrow" => "⟶", "longleftarrow" => "⟵",
+        "Longrightarrow" => "⟹", "Longleftarrow" => "⟸",
+        "nearrow" => "↗", "searrow" => "↘", "swarrow" => "↙", "nwarrow" => "↖",
+        // ── Delimiters ──
+        "langle" => "⟨", "rangle" => "⟩", "lceil" => "⌈", "rceil" => "⌉",
+        "lfloor" => "⌊", "rfloor" => "⌋", "lvert" | "rvert" | "vert" => "|",
+        "lVert" | "rVert" | "Vert" => "‖", "backslash" => "\\",
+        // ── Dots & misc ──
+        "ldots" | "dots" | "cdots" | "dotsc" | "dotsb" => "…",
+        "vdots" => "⋮", "ddots" => "⋱", "prime" => "′", "checkmark" => "✓",
+        // ── Spacing ──
+        "quad" | "qquad" | "thinspace" | "medspace" | "thickspace"
+        | "space" | "enspace" => " ",
+        "displaystyle" | "textstyle" | "scriptstyle" | "limits" | "nolimits" => "",
+        _ => return None,
+    })
+}
+
+/// True for LaTeX operator-name functions, which render as their bare name
+/// (`\sin` → `sin`, `\lim` → `lim`).
+fn is_math_function(name: &str) -> bool {
+    matches!(
+        name,
+        "sin" | "cos" | "tan" | "cot" | "sec" | "csc"
+            | "sinh" | "cosh" | "tanh" | "coth"
+            | "arcsin" | "arccos" | "arctan"
+            | "log" | "ln" | "lg" | "exp"
+            | "lim" | "limsup" | "liminf" | "max" | "min" | "sup" | "inf"
+            | "det" | "dim" | "ker" | "deg" | "gcd" | "hom" | "arg"
+            | "Pr" | "mod"
+    )
+}
+
+/// Maps a Latin letter to its blackboard-bold form (`\mathbb{R}` → `ℝ`).
+fn blackboard_char(c: char) -> char {
     match c {
-        '0' => '\u{2070}', '1' => '\u{00B9}', '2' => '\u{00B2}', '3' => '\u{00B3}',
-        '4' => '\u{2074}', '5' => '\u{2075}', '6' => '\u{2076}', '7' => '\u{2077}',
-        '8' => '\u{2078}', '9' => '\u{2079}', '+' => '\u{207A}', '-' => '\u{207B}',
-        '=' => '\u{207C}', '(' => '\u{207D}', ')' => '\u{207E}', 'n' => '\u{207F}',
-        'i' => '\u{2071}', _ => c,
+        'A' => '\u{1D538}', 'B' => '\u{1D539}', 'C' => '\u{2102}',
+        'D' => '\u{1D53B}', 'E' => '\u{1D53C}', 'F' => '\u{1D53D}',
+        'G' => '\u{1D53E}', 'H' => '\u{210D}', 'I' => '\u{1D540}',
+        'J' => '\u{1D541}', 'K' => '\u{1D542}', 'L' => '\u{1D543}',
+        'M' => '\u{1D544}', 'N' => '\u{2115}', 'O' => '\u{1D546}',
+        'P' => '\u{2119}', 'Q' => '\u{211A}', 'R' => '\u{211D}',
+        'S' => '\u{1D54A}', 'T' => '\u{1D54B}', 'U' => '\u{1D54C}',
+        'V' => '\u{1D54D}', 'W' => '\u{1D54E}', 'X' => '\u{1D54F}',
+        'Y' => '\u{1D550}', 'Z' => '\u{2124}',
+        other => other,
     }
 }
 
-/// Maps a character to its Unicode subscript equivalent, if one exists.
-/// Falls back to the original character for unmapped codepoints.
-fn subscript_char(c: char) -> char {
-    match c {
-        '0' => '\u{2080}', '1' => '\u{2081}', '2' => '\u{2082}', '3' => '\u{2083}',
-        '4' => '\u{2084}', '5' => '\u{2085}', '6' => '\u{2086}', '7' => '\u{2087}',
-        '8' => '\u{2088}', '9' => '\u{2089}', '+' => '\u{208A}', '-' => '\u{208B}',
-        '=' => '\u{208C}', '(' => '\u{208D}', ')' => '\u{208E}',
-        'a' => '\u{2090}', 'e' => '\u{2091}', 'o' => '\u{2092}', 'x' => '\u{2093}',
-        'h' => '\u{2095}', 'k' => '\u{2096}', 'l' => '\u{2097}', 'm' => '\u{2098}',
-        'n' => '\u{2099}', 'p' => '\u{209A}', 's' => '\u{209B}', 't' => '\u{209C}',
-        _ => c,
-    }
+/// Unicode superscript glyph for a character, if one exists.
+fn superscript(c: char) -> Option<char> {
+    Some(match c {
+        '0' => '⁰', '1' => '¹', '2' => '²', '3' => '³', '4' => '⁴',
+        '5' => '⁵', '6' => '⁶', '7' => '⁷', '8' => '⁸', '9' => '⁹',
+        '+' => '⁺', '-' => '⁻', '=' => '⁼', '(' => '⁽', ')' => '⁾',
+        'a' => 'ᵃ', 'b' => 'ᵇ', 'c' => 'ᶜ', 'd' => 'ᵈ', 'e' => 'ᵉ',
+        'f' => 'ᶠ', 'g' => 'ᵍ', 'h' => 'ʰ', 'i' => 'ⁱ', 'j' => 'ʲ',
+        'k' => 'ᵏ', 'l' => 'ˡ', 'm' => 'ᵐ', 'n' => 'ⁿ', 'o' => 'ᵒ',
+        'p' => 'ᵖ', 'r' => 'ʳ', 's' => 'ˢ', 't' => 'ᵗ', 'u' => 'ᵘ',
+        'v' => 'ᵛ', 'w' => 'ʷ', 'x' => 'ˣ', 'y' => 'ʸ', 'z' => 'ᶻ',
+        ' ' => ' ',
+        _ => return None,
+    })
 }
 
-/// Maps a LaTeX command name to its Unicode replacement.
-fn latex_command_to_unicode(cmd: &str) -> Option<&'static str> {
-    Some(match cmd {
-        // Greek lowercase
-        "alpha" => "\u{03B1}",
-        "beta" => "\u{03B2}",
-        "gamma" => "\u{03B3}",
-        "delta" => "\u{03B4}",
-        "epsilon" => "\u{03B5}",
-        "zeta" => "\u{03B6}",
-        "eta" => "\u{03B7}",
-        "theta" => "\u{03B8}",
-        "iota" => "\u{03B9}",
-        "kappa" => "\u{03BA}",
-        "lambda" => "\u{03BB}",
-        "mu" => "\u{03BC}",
-        "nu" => "\u{03BD}",
-        "xi" => "\u{03BE}",
-        "pi" => "\u{03C0}",
-        "rho" => "\u{03C1}",
-        "sigma" => "\u{03C3}",
-        "tau" => "\u{03C4}",
-        "upsilon" => "\u{03C5}",
-        "phi" => "\u{03C6}",
-        "chi" => "\u{03C7}",
-        "psi" => "\u{03C8}",
-        "omega" => "\u{03C9}",
-        // Greek uppercase
-        "Gamma" => "\u{0393}",
-        "Delta" => "\u{0394}",
-        "Theta" => "\u{0398}",
-        "Lambda" => "\u{039B}",
-        "Xi" => "\u{039E}",
-        "Pi" => "\u{03A0}",
-        "Sigma" => "\u{03A3}",
-        "Phi" => "\u{03A6}",
-        "Psi" => "\u{03A8}",
-        "Omega" => "\u{03A9}",
-        // Operators
-        "times" => "\u{00D7}",
-        "div" => "\u{00F7}",
-        "pm" => "\u{00B1}",
-        "mp" => "\u{2213}",
-        "cdot" => "\u{00B7}",
-        "leq" | "le" => "\u{2264}",
-        "geq" | "ge" => "\u{2265}",
-        "neq" | "ne" => "\u{2260}",
-        "approx" => "\u{2248}",
-        "equiv" => "\u{2261}",
-        "subset" => "\u{2282}",
-        "supset" => "\u{2283}",
-        "subseteq" => "\u{2286}",
-        "supseteq" => "\u{2287}",
-        "in" => "\u{2208}",
-        "notin" => "\u{2209}",
-        "cup" => "\u{222A}",
-        "cap" => "\u{2229}",
-        "land" | "wedge" => "\u{2227}",
-        "lor" | "vee" => "\u{2228}",
-        "neg" | "lnot" => "\u{00AC}",
-        "forall" => "\u{2200}",
-        "exists" => "\u{2203}",
-        "nabla" => "\u{2207}",
-        "partial" => "\u{2202}",
-        "infty" => "\u{221E}",
-        "emptyset" => "\u{2205}",
-        // Big operators
-        "sum" => "\u{03A3}",
-        "prod" => "\u{03A0}",
-        "int" => "\u{222B}",
-        "iint" => "\u{222C}",
-        "iiint" => "\u{222D}",
-        "oint" => "\u{222E}",
-        "sqrt" => "\u{221A}",
-        // Arrows
-        "to" | "rightarrow" => "\u{2192}",
-        "leftarrow" => "\u{2190}",
-        "leftrightarrow" => "\u{2194}",
-        "Rightarrow" => "\u{21D2}",
-        "Leftarrow" => "\u{21D0}",
-        "Leftrightarrow" | "iff" => "\u{21D4}",
-        "uparrow" => "\u{2191}",
-        "downarrow" => "\u{2193}",
-        "mapsto" => "\u{21A6}",
-        // Miscellaneous
-        "ldots" | "dots" | "cdots" => "\u{2026}",
-        "prime" => "\u{2032}",
-        "circ" => "\u{2218}",
-        "bullet" => "\u{2022}",
-        "star" => "\u{22C6}",
-        "dagger" => "\u{2020}",
-        "ddagger" => "\u{2021}",
-        // Spacing commands: collapse to a space.
-        "quad" | "qquad" => " ",
-        // Formatting wrappers: drop the command, content follows in braces.
-        "text" | "mathrm" | "mathbf" | "mathit" | "mathsf" | "mathtt"
-        | "textbf" | "textit" | "textrm" => "",
-        "frac" => "/",
-        "left" | "right" | "bigl" | "bigr" | "Big" | "big" => "",
+/// Unicode subscript glyph for a character, if one exists.
+fn subscript(c: char) -> Option<char> {
+    Some(match c {
+        '0' => '₀', '1' => '₁', '2' => '₂', '3' => '₃', '4' => '₄',
+        '5' => '₅', '6' => '₆', '7' => '₇', '8' => '₈', '9' => '₉',
+        '+' => '₊', '-' => '₋', '=' => '₌', '(' => '₍', ')' => '₎',
+        'a' => 'ₐ', 'e' => 'ₑ', 'h' => 'ₕ', 'i' => 'ᵢ', 'j' => 'ⱼ',
+        'k' => 'ₖ', 'l' => 'ₗ', 'm' => 'ₘ', 'n' => 'ₙ', 'o' => 'ₒ',
+        'p' => 'ₚ', 'r' => 'ᵣ', 's' => 'ₛ', 't' => 'ₜ', 'u' => 'ᵤ',
+        'v' => 'ᵥ', 'x' => 'ₓ',
+        ' ' => ' ',
         _ => return None,
     })
 }

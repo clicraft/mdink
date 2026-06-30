@@ -1481,6 +1481,122 @@
     }
 
     #[test]
+    fn test_unicode_math_fractions() {
+        let um = super::unicode_math;
+        // Simple operands stay bare; compound operands are parenthesized so the
+        // single-line form is never ambiguous.
+        assert_eq!(um("\\frac{1}{2}"), "1/2");
+        assert_eq!(um("\\frac{a+b}{c}"), "(a+b)/c");
+        assert_eq!(um("\\frac{-b}{2a}"), "(-b)/(2a)");
+    }
+
+    #[test]
+    fn test_unicode_math_roots() {
+        let um = super::unicode_math;
+        assert_eq!(um("\\sqrt{x}"), "\u{221A}x");
+        assert_eq!(um("\\sqrt{2}"), "\u{221A}2");
+        assert_eq!(um("\\sqrt[3]{x}"), "\u{221B}x"); // cube root glyph
+        assert_eq!(um("\\sqrt{b^2-4ac}"), "\u{221A}(b\u{00B2}-4ac)");
+    }
+
+    #[test]
+    fn test_unicode_math_superscript_fallback() {
+        let um = super::unicode_math;
+        // π has no superscript glyph: emit an honest `^(...)` instead of leaking
+        // the raw `\pi` command (the bug this rewrite fixes).
+        assert_eq!(um("e^{i\\pi}"), "e^(i\u{03C0})");
+        // Every char maps → real superscripts.
+        assert_eq!(um("x^{n-1}"), "x\u{207F}\u{207B}\u{00B9}");
+        assert_eq!(um("(X)^{-1}"), "(X)\u{207B}\u{00B9}");
+    }
+
+    #[test]
+    fn test_unicode_math_subscript_fallback() {
+        let um = super::unicode_math;
+        assert_eq!(um("a_{i}"), "a\u{1D62}");
+        // 'b' has no subscript glyph → fall back rather than leak.
+        assert_eq!(um("x_{ab}"), "x_(ab)");
+    }
+
+    #[test]
+    fn test_unicode_math_matrices() {
+        let um = super::unicode_math;
+        assert_eq!(
+            um("\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}"),
+            "(a b; c d)"
+        );
+        assert_eq!(
+            um("\\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}"),
+            "[1 2; 3 4]"
+        );
+        assert_eq!(
+            um("\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}"),
+            "|a b; c d|"
+        );
+    }
+
+    #[test]
+    fn test_unicode_math_blackboard() {
+        let um = super::unicode_math;
+        assert_eq!(um("\\mathbb{R}"), "\u{211D}");
+        assert_eq!(um("\\mathbb{Z}"), "\u{2124}");
+        assert_eq!(um("x \\in \\mathbb{N}"), "x \u{2208} \u{2115}");
+    }
+
+    #[test]
+    fn test_unicode_math_accents() {
+        let um = super::unicode_math;
+        assert_eq!(um("\\bar{x}"), "x\u{0304}");
+        assert_eq!(um("\\hat{\\beta}"), "\u{03B2}\u{0302}");
+        assert_eq!(um("\\vec{a}"), "a\u{20D7}");
+    }
+
+    #[test]
+    fn test_unicode_math_binom_and_functions() {
+        let um = super::unicode_math;
+        assert_eq!(um("\\binom{n}{k}"), "C(n, k)");
+        assert_eq!(um("\\sin x + \\cos y"), "sin x + cos y");
+        assert_eq!(um("\\lim_{x \\to 0}"), "lim_(x \u{2192} 0)");
+        assert_eq!(um("a \\equiv b \\pmod{n}"), "a \u{2261} b (mod n)");
+        assert_eq!(um("a \\bmod b"), "a mod b");
+    }
+
+    #[test]
+    fn test_unicode_math_text_wrapper() {
+        let um = super::unicode_math;
+        assert_eq!(um("\\text{hello world}"), "hello world");
+        assert_eq!(um("\\operatorname{Cov}(X, Y)"), "Cov(X, Y)");
+    }
+
+    /// Regression guard: realistic formulas must never leak a backslash-command
+    /// or a stray grouping brace into the rendered fallback.
+    #[test]
+    fn test_unicode_math_no_latex_leaks() {
+        let um = super::unicode_math;
+        for f in [
+            "\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}",
+            "\\sum_{i=1}^{n} x_i",
+            "\\int_{0}^{\\infty} e^{-x^2}\\,dx",
+            "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}",
+            "P(A \\mid B) = \\frac{P(B \\mid A)\\, P(A)}{P(B)}",
+            "\\forall x \\in \\mathbb{R}: x^2 \\geq 0",
+        ] {
+            let out = um(f);
+            assert!(!out.contains('\\'), "leaked backslash: {f:?} -> {out:?}");
+            assert!(
+                !out.contains('{') && !out.contains('}'),
+                "leaked brace: {f:?} -> {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_math_showcase_parses_without_panic() {
+        let source = include_str!("../../testdata/math-showcase.md");
+        let _ = parse(source, h());
+    }
+
+    #[test]
     fn test_parser_inline_math_produces_styled_span() {
         let blocks = parse("The formula $E = mc^{2}$ is famous.", h());
         assert_eq!(blocks.len(), 1);
