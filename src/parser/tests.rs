@@ -1597,6 +1597,81 @@
     }
 
     #[test]
+    fn test_normalize_mathjax_delimiters() {
+        let n = super::normalize_math_delimiters;
+        assert_eq!(n("\\(E = mc^2\\)"), "$E = mc^2$");
+        assert_eq!(n("\\[x = 1\\]"), "$$x = 1$$");
+        assert_eq!(n("plain text"), "plain text");
+        // Mixed with existing dollar math is left intact.
+        assert_eq!(n("a \\(x\\) and $y$"), "a $x$ and $y$");
+    }
+
+    #[test]
+    fn test_normalize_skips_code() {
+        let n = super::normalize_math_delimiters;
+        // Inline code span is preserved verbatim.
+        assert_eq!(n("use `\\(x\\)` raw"), "use `\\(x\\)` raw");
+        // Fenced code block is preserved verbatim.
+        let fenced = "```\n\\(x\\)\n```\n";
+        assert_eq!(n(fenced), fenced);
+    }
+
+    #[test]
+    fn test_parser_mathjax_inline_delimiters() {
+        let blocks = parse("Value \\(E = mc^2\\) here.", h());
+        let text: String = match &blocks[0] {
+            RenderedBlock::Paragraph { content } => content.iter().map(|s| s.text.as_str()).collect(),
+            _ => panic!("expected Paragraph"),
+        };
+        assert!(text.contains("$E = mc\u{00B2}$"), "got: {text}");
+    }
+
+    #[test]
+    fn test_render_display_math_stacks_fraction() {
+        let r = super::render_display_math;
+        // A bare fraction stacks numerator / bar / denominator.
+        assert_eq!(r("\\frac{a}{b}"), "a\n\u{2500}\nb");
+        // Leading text sits on the bar (baseline) line.
+        assert_eq!(r("x = \\frac{1}{2}"), "    1\nx = \u{2500}\n    2");
+        // No top-level fraction → single line, identical to unicode_math.
+        assert_eq!(r("a + b"), "a + b");
+        // A nested fraction stays single-line (only top level stacks).
+        assert_eq!(r("\\sqrt{\\frac{a}{b}}"), "\u{221A}(a/b)");
+    }
+
+    #[test]
+    fn test_parser_display_math_stacks_and_drops_delimiters() {
+        let blocks = parse("$$\\frac{n(n+1)}{2}$$", h());
+        let text: String = blocks
+            .iter()
+            .flat_map(|b| match b {
+                RenderedBlock::Paragraph { content } => {
+                    content.iter().map(|s| s.text.clone()).collect::<Vec<_>>()
+                }
+                _ => vec![],
+            })
+            .collect();
+        assert!(text.contains('\u{2500}'), "expected a fraction bar: {text:?}");
+        assert!(!text.contains("$$"), "stacked display drops $$: {text:?}");
+    }
+
+    #[test]
+    fn test_parser_display_math_without_fraction_keeps_delimiters() {
+        // Single-line display math (no top-level fraction) is unchanged.
+        let blocks = parse("$$\\alpha + \\beta$$", h());
+        let text: String = blocks
+            .iter()
+            .flat_map(|b| match b {
+                RenderedBlock::Paragraph { content } => {
+                    content.iter().map(|s| s.text.clone()).collect::<Vec<_>>()
+                }
+                _ => vec![],
+            })
+            .collect();
+        assert!(text.contains("$$\u{03B1} + \u{03B2}$$"), "got: {text:?}");
+    }
+
+    #[test]
     fn test_parser_inline_math_produces_styled_span() {
         let blocks = parse("The formula $E = mc^{2}$ is famous.", h());
         assert_eq!(blocks.len(), 1);

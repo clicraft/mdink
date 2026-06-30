@@ -83,3 +83,17 @@ Uppercase: $\Gamma\ \Delta\ \Theta\ \Lambda\ \Sigma\ \Phi\ \Psi\ \Omega$
 Relations: $\leq\ \geq\ \neq\ \approx\ \equiv\ \sim\ \propto\ \ll\ \gg$
 
 Arrows: $\to\ \gets\ \leftrightarrow\ \Rightarrow\ \Leftrightarrow\ \mapsto$
+
+## MathJax Delimiters
+
+Inline with `\(...\)`: \(a^2 + b^2 = c^2\) is the Pythagorean theorem.
+
+Display with `\[...\]`:
+
+\[ x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} \]
+
+A literal `\(x\)` inside inline code must stay raw, and so must a fenced block:
+
+```
+not math: \(x\) and \[y\]
+```

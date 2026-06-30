@@ -866,9 +866,16 @@ impl<'a> ParseContext<'a> {
 
     fn push_display_math(&mut self, text: &str) {
         let style = theme::inline_style(&self.theme.math_display);
-        let converted = sanitize_text(&unicode_math(text)).into_owned();
+        let rendered = sanitize_text(&render_display_math(text)).into_owned();
+        // A stacked (multi-line) fraction can't sensibly carry `$$` delimiters;
+        // single-line display math keeps them as a visual marker.
+        let text = if rendered.contains('\n') {
+            rendered
+        } else {
+            format!("$${rendered}$$")
+        };
         let content = vec![StyledSpan {
-            text: format!("$${converted}$$"),
+            text,
             style,
             url: None,
         }];
@@ -1246,6 +1253,221 @@ fn accent(mut base: String, mark: char) -> String {
     base
 }
 
+// ── MathJax-style delimiter normalization ────────────────────────────────────
+
+/// Rewrites MathJax `\(…\)` / `\[…\]` delimiters into the `$…$` / `$$…$$` forms
+/// that pulldown-cmark's math extension recognizes.
+///
+/// Fenced code blocks and inline `` `code` `` spans are left untouched, so a
+/// literal `\(` inside a snippet is never rewritten. Returns `Cow::Borrowed`
+/// when there is nothing to do (the common case).
+fn normalize_math_delimiters(src: &str) -> Cow<'_, str> {
+    if !src.contains("\\(")
+        && !src.contains("\\[")
+        && !src.contains("\\)")
+        && !src.contains("\\]")
+    {
+        return Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in src.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let marker = fence_marker(body.trim_start());
+        match fence {
+            Some((fc, flen)) => {
+                if marker.is_some_and(|(c, n)| c == fc && n >= flen) {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            None => {
+                if let Some(m) = marker {
+                    fence = Some(m);
+                    out.push_str(line);
+                    continue;
+                }
+            }
+        }
+        normalize_prose_line(body, &mut out);
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Returns `(fence_char, run_length)` if `trimmed` opens/closes a code fence.
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let n = trimmed.chars().take_while(|&c| c == first).count();
+    (n >= 3).then_some((first, n))
+}
+
+/// Replaces math delimiters on a single prose line, skipping inline code spans.
+fn normalize_prose_line(line: &str, out: &mut String) {
+    let mut chars = line.chars().peekable();
+    let mut code_run = 0usize; // backtick-run length of the span we're inside, 0 = none
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            let mut n = 1;
+            while chars.peek() == Some(&'`') {
+                n += 1;
+                chars.next();
+            }
+            for _ in 0..n {
+                out.push('`');
+            }
+            if code_run == 0 {
+                code_run = n;
+            } else if code_run == n {
+                code_run = 0;
+            }
+            continue;
+        }
+        if code_run > 0 {
+            out.push(c);
+            continue;
+        }
+        if c == '\\' {
+            match chars.peek() {
+                Some('(' | ')') => {
+                    chars.next();
+                    out.push('$');
+                }
+                Some('[' | ']') => {
+                    chars.next();
+                    out.push_str("$$");
+                }
+                _ => out.push('\\'),
+            }
+            continue;
+        }
+        out.push(c);
+    }
+}
+
+// ── Display-math layout (top-level stacked fractions) ────────────────────────
+
+/// A horizontal piece of a display equation: either flat text (on the baseline)
+/// or a stacked fraction (numerator / bar / denominator).
+enum DisplayPiece {
+    Text(String),
+    Frac(String, String),
+}
+
+/// Renders display (`$$…$$`) math, stacking *top-level* fractions across three
+/// lines so they read like a textbook. Nested fractions (e.g. under a `\sqrt`)
+/// and everything else stay single-line. With no top-level fraction the result
+/// is exactly the single line `unicode_math` would produce.
+fn render_display_math(latex: &str) -> String {
+    let pieces = split_top_level_fractions(latex);
+    if !pieces.iter().any(|p| matches!(p, DisplayPiece::Frac(..))) {
+        return unicode_math(latex);
+    }
+    let (mut top, mut mid, mut bot) = (String::new(), String::new(), String::new());
+    for piece in &pieces {
+        match piece {
+            DisplayPiece::Text(s) => {
+                let w = display_width(s);
+                top.push_str(&" ".repeat(w));
+                mid.push_str(s);
+                bot.push_str(&" ".repeat(w));
+            }
+            DisplayPiece::Frac(num, den) => {
+                let w = display_width(num).max(display_width(den)).max(1);
+                top.push_str(&center_in(num, w));
+                mid.push_str(&"\u{2500}".repeat(w)); // ─ fraction bar
+                bot.push_str(&center_in(den, w));
+            }
+        }
+    }
+    format!("{}\n{}\n{}", top.trim_end(), mid.trim_end(), bot.trim_end())
+}
+
+/// Splits display LaTeX into baseline text runs and top-level fractions. A
+/// `\frac` nested inside braces is left in its text run (rendered single-line) —
+/// only depth-0 fractions stack.
+fn split_top_level_fractions(latex: &str) -> Vec<DisplayPiece> {
+    let mut pieces = Vec::new();
+    let mut gap = String::new();
+    let mut depth = 0i32;
+    let mut chars = latex.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            '{' => {
+                depth += 1;
+                gap.push('{');
+                chars.next();
+            }
+            '}' => {
+                depth -= 1;
+                gap.push('}');
+                chars.next();
+            }
+            '\\' => {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&a) = chars.peek() {
+                    if a.is_ascii_alphabetic() {
+                        name.push(a);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if name.is_empty() {
+                    // Escaped char (\{, \}, \\, …): copy verbatim, no depth change.
+                    gap.push('\\');
+                    if let Some(ch) = chars.next() {
+                        gap.push(ch);
+                    }
+                } else if depth == 0
+                    && matches!(name.as_str(), "frac" | "dfrac" | "tfrac" | "cfrac")
+                {
+                    let num = read_raw_group(&mut chars);
+                    let den = read_raw_group(&mut chars);
+                    if !gap.is_empty() {
+                        pieces.push(DisplayPiece::Text(unicode_math(&std::mem::take(&mut gap))));
+                    }
+                    pieces.push(DisplayPiece::Frac(unicode_math(&num), unicode_math(&den)));
+                } else {
+                    gap.push('\\');
+                    gap.push_str(&name);
+                }
+            }
+            _ => {
+                gap.push(c);
+                chars.next();
+            }
+        }
+    }
+    if !gap.is_empty() {
+        pieces.push(DisplayPiece::Text(unicode_math(&gap)));
+    }
+    pieces
+}
+
+/// Display width of a string (wide glyphs counted as 2, combiners as 0).
+fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Centers `s` within `w` display columns by padding with spaces.
+fn center_in(s: &str, w: usize) -> String {
+    let sw = display_width(s);
+    if sw >= w {
+        return s.to_string();
+    }
+    let pad = w - sw;
+    let left = pad / 2;
+    format!("{}{}{}", " ".repeat(left), s, " ".repeat(pad - left))
+}
+
 /// Maps a LaTeX command name to a standalone Unicode symbol.
 ///
 /// Structural commands (`\frac`, `\sqrt`, `\begin`, accents, text wrappers, …)
@@ -1400,7 +1622,8 @@ pub fn parse(
     images: &mut crate::images::ImageManager,
     theme: &MarkdownTheme,
 ) -> Vec<RenderedBlock> {
-    ParseContext::new(highlighter, images, theme).process(source)
+    let source = normalize_math_delimiters(source);
+    ParseContext::new(highlighter, images, theme).process(&source)
 }
 
 /// Allows `ParserState` to be used in debug_assert messages.
